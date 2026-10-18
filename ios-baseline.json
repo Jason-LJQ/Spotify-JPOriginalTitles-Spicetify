@@ -1,0 +1,15 @@
+{
+  "baseline": "v7.0.2",
+  "iosHEAD": "8c19c390de93ab581d755fb8986576c76ac64296",
+  "scope": "Independent implementation aligned by source identity and shared fixture replay; no runtime cross-repository dependency.",
+  "sha256": {
+    "jp-original-titles/JPOriginalTitles.m": "e767bf81b90e34ce3fafe5dfd13d6c72513666ae73149356d83483e427e3971a",
+    "jp-original-titles/JPTCredits.m": "9fd2127d36aabd1ccc06f2042e7e17f1e5f102b9882cccdce3fbed095f4d3c3a",
+    "jp-original-titles/JPTPreviousMetadata.m": "774681c14e4a44a840419988b5e78424effb83c216a326808032b2873f48f0d5"
+  },
+  "historicalBaselineLimitations": [
+    "Direct CJK canonical selection has no recording identity gate.",
+    "Positional artist-name adoption can preserve incorrect source associations."
+  ],
+  "macSafeguards": "The current Mac resolver rejects simultaneous ISRC/duration contradictions and requires verified artist-alias evidence. These historical iOS limitations are not current Mac behavior."
+}

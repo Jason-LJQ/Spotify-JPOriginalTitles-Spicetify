@@ -1,0 +1,10 @@
+node_modules/
+.DS_Store
+.idea/
+analysis-*/
+local/
+*.log
+.env*
+coverage/
+__pycache__/
+*.pyc

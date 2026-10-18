@@ -1,0 +1,21 @@
+{
+  "name": "jp-original-title-spicetify",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Restore original names in Spotify Desktop with Spicetify",
+  "type": "module",
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "test": "node --test test/*.test.mjs",
+    "check": "node tools/check.mjs",
+    "install:local": "python3 tools/install-local.py",
+    "check:marketplace": "node tools/validate-marketplace.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Jason-LJQ/Spotify-JPOriginalTitles-Spicetify.git"
+  }
+}

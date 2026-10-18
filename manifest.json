@@ -1,0 +1,12 @@
+{
+  "name": "JP Original Title (Spicetify)",
+  "description": "Restore original Japanese track, album and artist names, with previous values in Credits.",
+  "preview": "assets/preview.png",
+  "main": "dist/jp-original-titles.js",
+  "readme": "README.md",
+  "branch": "main",
+  "authors": [
+    { "name": "Jason-LJQ", "url": "https://github.com/Jason-LJQ" }
+  ],
+  "tags": ["japanese", "metadata", "titles", "credits"]
+}
