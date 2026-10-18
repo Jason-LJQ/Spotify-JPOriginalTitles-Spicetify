@@ -1,4 +1,4 @@
-// JP Original Title (Spicetify) v0.1.0
+// JP Original Title (Spicetify) v1.0.0
 (() => {
   // src/wire.mjs
   var encoder = new TextEncoder();
@@ -2056,8 +2056,8 @@
   }
 
   // src/index.mjs
-  var BUILD = false ? "source-development" : "9167572e7b05";
-  var VERSION = false ? void 0 : "0.1.0";
+  var BUILD = false ? "source-development" : "21d8abd0f630";
+  var VERSION = false ? void 0 : "1.0.0";
   var CHANNEL = VERSION ? "release" : "local-development";
   var NAME = "JP Original Title (Spicetify)";
   var STARTUP = /* @__PURE__ */ Symbol.for("JPOriginalTitle.startup");

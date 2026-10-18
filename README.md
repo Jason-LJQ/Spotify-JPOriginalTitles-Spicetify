@@ -2,6 +2,8 @@
 
 Restore original Japanese track, album and artist names in Spotify Desktop, with previous values available in Credits.
 
+Based on [Spotify JPOriginalTitles for iOS](https://github.com/Jason-LJQ/Spotify-JPOriginalTitles). The Spicetify extension has independent builds and releases, with additional desktop matching safeguards.
+
 ![Illustration of original title restoration](assets/preview.png)
 
 ## Features
