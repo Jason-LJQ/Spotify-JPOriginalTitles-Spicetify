@@ -15,12 +15,39 @@ const find = (bytes, number) => fields(bytes).find(field => field.field === numb
 const stringAt = (bytes, number) => decode(find(bytes, number));
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const bytesEqual = (a, b) => a.length === b.length && a.every((value, i) => value === b[i]);
-const clone = value => {
-  if (value instanceof Uint8Array) return value.slice();
-  if (Array.isArray(value)) return value.map(clone);
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, clone(item)]));
-  return value;
-};
+function draft(value) {
+  if (!value || typeof value !== 'object' || ArrayBuffer.isView(value)) return { value, finish: () => value };
+  let copy;
+  const children = new Map();
+  const current = () => copy || value;
+  const writable = () => copy || (copy = Array.isArray(value) ? value.slice() : { ...value });
+  const proxy = new Proxy(Array.isArray(value) ? [] : {}, {
+    get(_, key) {
+      const item = Reflect.get(current(), key);
+      if (!item || typeof item !== 'object' || ArrayBuffer.isView(item)) return item;
+      if (!children.has(key)) children.set(key, draft(item));
+      return children.get(key).value;
+    },
+    set(_, key, item) {
+      if (Reflect.get(current(), key) !== item) { writable()[key] = item; children.delete(key); }
+      return true;
+    },
+    deleteProperty(_, key) { delete writable()[key]; children.delete(key); return true; },
+    has: (_, key) => key in current(),
+    ownKeys: () => Reflect.ownKeys(current()),
+    getOwnPropertyDescriptor(_, key) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(current(), key);
+      return descriptor && { ...descriptor, configurable: key !== 'length' || !Array.isArray(value) };
+    }
+  });
+  return { value: proxy, finish() {
+    for (const [key, child] of children) {
+      const item = child.finish();
+      if (item !== Reflect.get(current(), key)) writable()[key] = item;
+    }
+    return current();
+  } };
+}
 function failure(code, message, cause) {
   const error = new Error(message, cause ? { cause } : undefined);
   error.code = code;
@@ -275,13 +302,15 @@ export function createTransformer({ resolver, store, isStrict = () => false, log
     checkAbort(signal);
     let preparationFailed = false;
     try {
-      await store.commit({ artistNames: resolved.artistNames || new Map(), previous: observationDeltas(observations), prepare: async projected => {
+      await store.commit({ artistNames: resolved.artistNames || new Map(), previous: observationDeltas(observations), lookup: resolved.lookup, prepare: async projected => {
         try {
           checkAbort(signal);
+          resolver.assertCurrent?.(resolved);
           await prepare?.(projected);
           checkAbort(signal);
         } catch (error) { preparationFailed = true; throw error; }
       } });
+      resolver.didPersist?.(resolved.lookup);
     } catch (error) {
       if (preparationFailed) throw error;
       throw failure('JPT_STORAGE_FAILED', 'Metadata storage transaction failed', error);
@@ -360,11 +389,12 @@ export function createTransformer({ resolver, store, isStrict = () => false, log
     })), output);
     await validate?.(finalOutput);
     });
-    return finalOutput;
+    return bytesEqual(bytes, finalOutput) ? bytes : finalOutput;
   }
   async function rewriteStructured(value, options = {}, mode = 'json') {
     const { signal, priority = mode === 'native' ? 3 : 1 } = options;
-    const output = clone(value);
+    const candidate = draft(value);
+    const output = candidate.value;
     const uris = new Set();
     const native = { tracks: new Map(), albums: new Map() };
     const collect = (object, inheritedURI, inheritedKind, keyHint) => {
@@ -387,7 +417,7 @@ export function createTransformer({ resolver, store, isStrict = () => false, log
         collect(item, uri, nextKind, key);
       }
     };
-    collect(output);
+    collect(value);
     if (mode === 'native') resolver.ingest?.(native);
     const suppliedURI = entityURI(options.uri || options.trackURI || options.trackUri);
     if (suppliedURI) uris.add(suppliedURI);
@@ -406,14 +436,14 @@ export function createTransformer({ resolver, store, isStrict = () => false, log
         const raw = object.extensionResult.value;
         const rewritten = parseGuard(() => rewriteWireValue(raw, kind, uri, resolved), raw);
         if ([10, 97, 128, 178].includes(kind)) parseGuard(() => capture(observations, uri, previousWire(raw, kind), previousWire(rewritten, kind), kind === 178 ? 3 : kind === 10 ? 2 : 1));
-        object.extensionResult.value = rewritten;
+        object.extensionResult.value = bytesEqual(raw, rewritten) ? raw : rewritten;
       }
       if (uri && object.value instanceof Uint8Array && (object.typeUrl || object.type_url)) {
         const inferredKind = kind || (/\.Track$/.test(object.typeUrl || object.type_url) ? 10 : undefined);
         const raw = object.value;
         const rewritten = parseGuard(() => rewriteWireValue(raw, inferredKind, uri, resolved), raw);
         if ([10, 97, 128, 178].includes(inferredKind)) parseGuard(() => capture(observations, uri, previousWire(raw, inferredKind), previousWire(rewritten, inferredKind), inferredKind === 178 ? 3 : inferredKind === 10 ? 2 : 1));
-        object.value = rewritten;
+        object.value = bytesEqual(raw, rewritten) ? raw : rewritten;
         if (inferredKind === 186) credits.push({ holder: object, uri, raw: true });
       }
       const suppliedTrackCarrier = suppliedURI?.startsWith('spotify:track:') && uri === suppliedURI && keyHint === 'trackUnion' && typeof displayName(object) === 'string';
@@ -432,14 +462,20 @@ export function createTransformer({ resolver, store, isStrict = () => false, log
       }
     };
     visit(output, suppliedURI, undefined);
+    let finalOutput;
     await commit(resolved, observations, signal, async ({ getPrevious }) => {
       for (const item of credits) {
-        if (item.raw) item.holder.value = parseGuard(() => creditsWire(item.holder.value, getPrevious(item.uri)), item.holder.value);
+        if (item.raw) {
+          const raw = item.holder.value;
+          const rewritten = parseGuard(() => creditsWire(raw, getPrevious(item.uri)), raw);
+          item.holder.value = bytesEqual(raw, rewritten) ? raw : rewritten;
+        }
         else addCredits(item.value, getPrevious(item.uri), item.graphQL);
       }
-      await options.validate?.(output);
+      finalOutput = candidate.finish();
+      await options.validate?.(finalOutput);
     });
-    return output;
+    return finalOutput;
   }
   return {
     rewriteJSON: (value, options) => rewriteStructured(value, options, 'json'),

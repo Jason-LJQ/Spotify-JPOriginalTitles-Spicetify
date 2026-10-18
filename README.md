@@ -13,7 +13,8 @@ Based on [Spotify JPOriginalTitles for iOS](https://github.com/Jason-LJQ/Spotify
 - Looks up artist names with Chinese-first and conservative Japanese fallback rules, retaining playable artist links.
 - Rejects canonical candidates whose recording identifiers and exact durations both conflict. Independently queried artist identities take priority over unverified positional associations.
 - Adds **Original Metadata** to Credits. **Title**, **Artist** and **Album** show only nonempty values actually replaced by the extension.
-- Stores learned artist names and previous fields in a dedicated IndexedDB database, committing changes before delivering enhanced responses.
+- Saves track and album lookups, verified artist information and previous fields in a dedicated IndexedDB database. Cached lookups are reused after restarting Spotify.
+- Shares duplicate lookups across pages and skips unnecessary album lookups after a verified direct match.
 - Includes optional Strict Mode, diagnostics, plugin-cache reset and viewed-metadata refresh.
 
 The extension does not translate titles, rename playlists, change Spotify's language, replace audio or unlock restricted releases. It was developed on macOS; Windows and Linux compatibility has not been established.
@@ -54,7 +55,7 @@ Open **JP Original Title (Spicetify)** in Spotify's profile menu, or use its top
 
 Diagnostic logging and Strict Mode are off by default. Strict Mode blocks enhanced responses when a lookup or parser fails and can prevent affected pages from loading.
 
-**Reset Plugin Cache** clears this extension's learned names, previous fields and in-process lookups. **Refresh Viewed Spotify Metadata** expires supported metadata for entities observed in the current session. Settings and the installation-prompt choice survive a plugin-cache reset. Records have no row-count eviction.
+**Reset Plugin Cache** clears this extension's saved lookups, learned names, artist verification and previous fields. **Refresh Viewed Spotify Metadata** expires supported metadata for entities observed in the current session. Settings and the installation-prompt choice survive a plugin-cache reset. Records have no row-count eviction.
 
 Marketplace resolves the manifest and extension bundle from `main`. For manual updates, replace the JavaScript file with the latest release and reload Spotify. Release assets and their SHA-256 checksums are available on GitHub.
 

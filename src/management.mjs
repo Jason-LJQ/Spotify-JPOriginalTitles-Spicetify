@@ -36,6 +36,7 @@ export function installManagement({ Spicetify: S, store, resolver, hooks, settin
     if (!api?.expire) throw new Error('Metadata refresh is unavailable in this Spotify client');
     await api.expire(...uris.map(uri => [uri, 178, ...(uri.startsWith('spotify:track:') ? [10, 186] : uri.startsWith('spotify:album:') ? [9] : [8])]));
     resolver.clear();
+    resolver.restore?.();
     await hooks.refresh?.();
     return uris.length;
   }
@@ -65,7 +66,7 @@ export function installManagement({ Spicetify: S, store, resolver, hooks, settin
     const body = element('div'); body.style.cssText = 'max-width:640px;line-height:1.6;padding-bottom:12px';
     element('p', `${version ? `v${version}` : 'Local development build'} · ${buildID}`, body);
     const summary = element('p', undefined, body);
-    const update = () => { const s = store.stats(); summary.textContent = `${s.artistNames} artist names · ${s.previousFields} previous fields · ${s.tracks} tracks · ${(s.bytes / 1024).toFixed(1)} KB stored data (estimate)`; };
+    const update = () => { const s = store.stats(); summary.textContent = `${s.lookupEntities ?? 0} cached tracks/albums · ${s.artistNames} artist names · ${s.previousFields} previous fields · ${(s.bytes / 1024).toFixed(1)} KB stored data (estimate)`; };
     update();
     checkbox(body, 'Strict Mode', settings.strict, value => settings.update({ strict: value }));
     element('p', 'Strict Mode blocks enhanced responses when a lookup or parsing fails. It can prevent pages from loading.', body);

@@ -1,4 +1,4 @@
-// JP Original Title (Spicetify) v1.0.0
+// JP Original Title (Spicetify) v1.0.1
 (() => {
   // src/wire.mjs
   var encoder = new TextEncoder();
@@ -310,11 +310,12 @@
   }
   var Resolver = class {
     constructor({ request, store, isStrict = () => false, log = () => {
-    } }) {
+    }, scope = "US:premium" }) {
       this.request = request;
       this.store = store;
       this.isStrict = isStrict;
       this.log = log;
+      this.scope = `lookup-v1:zh-Hans,ja:${scope}`;
       this.cache = /* @__PURE__ */ new Map();
       this.clients = /* @__PURE__ */ new Map();
       this.reverse = /* @__PURE__ */ new Map();
@@ -327,9 +328,22 @@
       this.requests = 0;
       this.maxActive = 0;
       this.generation = 0;
+      this.inFlight = /* @__PURE__ */ new Map();
+      this.dirty = { entities: /* @__PURE__ */ new Map(), authorities: /* @__PURE__ */ new Map(), aliases: /* @__PURE__ */ new Map() };
+      this.restore();
+    }
+    restore() {
+      const saved = this.store?.getLookup?.(this.scope);
+      for (const [uri, value] of saved?.entities ?? []) this.cache.set(uri, value);
+      for (const [uri, value] of saved?.authorities ?? []) this.artistAuthorities.set(uri, value);
+      for (const [uri, value] of saved?.aliases ?? []) this.verifiedAliases.set(uri, value);
+      this.index(this.cache);
     }
     clear() {
       this.generation++;
+      for (const operation of new Set(this.inFlight.values())) operation.controller.abort();
+      this.inFlight.clear();
+      for (const map of Object.values(this.dirty)) map.clear();
       this.cache.clear();
       this.clients.clear();
       this.reverse.clear();
@@ -337,6 +351,22 @@
       this.artistAuthorities.clear();
       this.verifiedAliases.clear();
       this.observedUris.clear();
+    }
+    lookupChanges() {
+      return {
+        scope: this.scope,
+        generation: this.generation,
+        ...Object.fromEntries(Object.entries(this.dirty).map(([key2, map]) => [key2, new Map(map)]))
+      };
+    }
+    didPersist(lookup) {
+      if (lookup?.generation !== this.generation) return;
+      for (const [type, pending] of Object.entries(this.dirty)) for (const [uri, value] of lookup[type]) {
+        if (pending.get(uri) === value) pending.delete(uri);
+      }
+    }
+    assertCurrent(result) {
+      if (result.generation !== void 0 && result.generation !== this.generation) throw abortError();
     }
     stats() {
       return { cachedEntities: this.cache.size, clientEntities: this.clients.size, viewedEntities: this.observedUris.size, artistNames: this.names.size, verifiedAliases: this.verifiedAliases.size, active: this.active, queued: this.queue.length, requests: this.requests, maxActive: this.maxActive };
@@ -358,9 +388,17 @@
       this.maxActive = Math.max(this.maxActive, this.active);
       try {
         if (context.signal?.aborted || context.generation !== this.generation) throw abortError();
+        const unused = context.unused?.();
+        if (unused) {
+          this.record(context, unused, true);
+          throw unused;
+        }
         if (context.stopped) throw context.stopped;
         this.requests++;
         return await callback();
+      } catch (error) {
+        if ([401, 403, 429].includes(error.status ?? error.statusCode) || error.name === "AbortError" || error.offline) context.onRejected?.(error);
+        throw error;
       } finally {
         if (this.queue.length) this.queue.shift()();
         else this.active--;
@@ -370,6 +408,7 @@
       if (!error) return;
       if (!context.failures.includes(error)) context.failures.push(error);
       if (terminal || this.isStrict()) context.stopped = error;
+      context.onFailure?.(error, !!context.stopped);
     }
     async attempt(uris, language, context, artist) {
       const values = /* @__PURE__ */ new Map(), retry = /* @__PURE__ */ new Set();
@@ -417,8 +456,11 @@
       }
       if (whole) for (const uri of uris) retry.add(uri);
       if (terminal) this.record(context, error, true);
-      if (!artist && context.generation === this.generation) {
-        for (const [uri, value] of values) this.cache.set(uri, value);
+      if (!artist && !context.signal?.aborted && context.generation === this.generation) {
+        for (const [uri, value] of values) {
+          this.cache.set(uri, value);
+          this.dirty.entities.set(uri, value);
+        }
         this.index(values);
       }
       return { values, retry, error, whole, terminal };
@@ -465,8 +507,59 @@
       const out = /* @__PURE__ */ new Map(), batches = chunks(uris, 256);
       const run = async (batch) => {
         if (context.stopped) return;
-        const values = await this.batch(batch, language, context, artist);
-        for (const [uri, value] of values) out.set(uri, value);
+        if (context.signal?.aborted || context.generation !== this.generation) {
+          this.record(context, abortError(), true);
+          return;
+        }
+        const operations = /* @__PURE__ */ new Set(), missing = [];
+        const key2 = (uri) => `${context.generation}:${language}:${artist ? 8 : isAlbum(uri) ? 9 : 10}:${uri}`;
+        for (const uri of batch) {
+          if (cached && !artist && this.cache.has(uri)) continue;
+          const operation = this.inFlight.get(key2(uri));
+          if (operation) operations.add(operation);
+          else missing.push(uri);
+        }
+        if (missing.length) {
+          const controller = new AbortController();
+          const shared = { signal: controller.signal, failures: [], stopped: void 0, generation: context.generation };
+          const operation = { controller, consumers: /* @__PURE__ */ new Set(), keys: missing.map(key2), context: shared };
+          shared.onFailure = (error, terminal) => {
+            for (const consumer of operation.consumers) this.record(consumer.context, error, terminal);
+          };
+          shared.onRejected = (error) => {
+            for (const consumer of operation.consumers) consumer.context.stopped = error;
+          };
+          shared.unused = () => [...operation.consumers].every((consumer) => consumer.context.stopped || consumer.context.signal?.aborted) ? [...operation.consumers][0]?.context.stopped || abortError() : void 0;
+          for (const name of operation.keys) this.inFlight.set(name, operation);
+          operation.promise = Promise.resolve().then(() => this.batch(missing, language, shared, artist)).finally(() => {
+            for (const name of operation.keys) if (this.inFlight.get(name) === operation) this.inFlight.delete(name);
+          });
+          operations.add(operation);
+        }
+        await Promise.all([...operations].map(async (operation) => {
+          const consumer = { context };
+          operation.consumers.add(consumer);
+          let onAbort;
+          const cancelled = new Promise((_, reject) => {
+            onAbort = () => reject(abortError());
+            context.signal?.addEventListener("abort", onAbort, { once: true });
+            if (context.signal?.aborted) onAbort();
+          });
+          try {
+            const values = await Promise.race([operation.promise, cancelled]);
+            for (const error of operation.context.failures) this.record(context, error, operation.context.stopped === error);
+            for (const [uri, value] of values) if (batch.includes(uri)) out.set(uri, value);
+          } catch (error) {
+            this.record(context, error, true);
+          } finally {
+            context.signal?.removeEventListener("abort", onAbort);
+            operation.consumers.delete(consumer);
+            if (!operation.consumers.size) {
+              operation.controller.abort();
+              for (const name of operation.keys) if (this.inFlight.get(name) === operation) this.inFlight.delete(name);
+            }
+          }
+        }));
       };
       if (parallel) await Promise.all(batches.map(run));
       else for (const batch of batches) {
@@ -478,9 +571,9 @@
     async associated(uris, context) {
       const albums = /* @__PURE__ */ new Set();
       for (const uri of uris) {
-        const track = this.cache.get(uri);
+        const track = this.cache.get(uri), direct = this.cache.get(romanizedCanonical(uri, track));
         if (isAlbum(uri)) albums.add(uri);
-        else if (track && !hasCJK(track.name) && track.isrc && track.albumURI) albums.add(track.albumURI);
+        else if (track && !hasCJK(track.name) && track.isrc && track.albumURI && !(direct && hasCJK(direct.name) && directCompatible(track, direct))) albums.add(track.albumURI);
       }
       await this.query(albums, context);
       const linked = [...albums].flatMap((uri) => {
@@ -525,15 +618,18 @@
       await this.query(albums, context);
       await this.query([...albums].flatMap((uri) => this.cache.get(uri)?.tracks ?? []), context);
     }
-    applyArtistAuthorities(names) {
-      for (const [uri, alias] of this.verifiedAliases) if (alias.name) names.set(uri, alias.name);
-      for (const [uri, authority] of this.artistAuthorities) {
+    applyArtistAuthorities(names, wanted = /* @__PURE__ */ new Set([...this.verifiedAliases.keys(), ...this.artistAuthorities.keys()])) {
+      for (const uri of wanted) {
+        const alias = this.verifiedAliases.get(uri), authority = this.artistAuthorities.get(uri);
+        if (alias?.name) names.set(uri, alias.name);
+        if (!authority) continue;
         if (!authority.name) names.delete(uri);
         else names.set(uri, hasCJK(authority.name) ? authority.name : this.verifiedAliases.get(uri)?.name || authority.name);
       }
     }
     learnVerifiedAliases(own, original) {
-      if (!own?.isrc || own.isrc !== original?.isrc || !own.duration || own.duration !== original.duration || !safeArtistPositions(own, original)) return;
+      const changed = /* @__PURE__ */ new Set();
+      if (!own?.isrc || own.isrc !== original?.isrc || !own.duration || own.duration !== original.duration || !safeArtistPositions(own, original)) return changed;
       for (let i = 0; i < own.artists.length; i++) {
         const source = own.artists[i], candidate = original.artists[i], authority = this.artistAuthorities.get(source.uri);
         if (hasCJK(source.name) || !hasCJK(candidate.name) || authority && (!authority.name || hasCJK(authority.name))) continue;
@@ -541,7 +637,12 @@
         if (prior?.conflict) continue;
         if (prior && prior.name !== candidate.name) this.verifiedAliases.set(source.uri, { conflict: true });
         else if (!prior) this.verifiedAliases.set(source.uri, { name: candidate.name, sourceTrackURI: own.uri, originalTrackURI: original.uri, isrc: own.isrc, duration: own.duration });
+        if (this.verifiedAliases.get(source.uri) !== prior) {
+          changed.add(source.uri);
+          this.dirty.aliases.set(source.uri, this.verifiedAliases.get(source.uri));
+        }
       }
+      return changed;
     }
     async artistOriginals(wanted, names, context) {
       const missing = unique(wanted).filter((uri) => !this.artistAuthorities.get(uri)?.complete);
@@ -552,6 +653,7 @@
         if (!zh.has(uri)) continue;
         const name = zh.get(uri);
         this.artistAuthorities.set(uri, { name, language: "zh-Hans", complete: !name || hasCJK(name) });
+        this.dirty.authorities.set(uri, this.artistAuthorities.get(uri));
         if (name?.length && !hasCJK(name)) japanese.push(uri);
       }
       const ja = await this.query(japanese, context, { artist: true, language: "ja", parallel: false });
@@ -561,6 +663,7 @@
         const name = ja.get(uri);
         const authority = this.artistAuthorities.get(uri);
         this.artistAuthorities.set(uri, japaneseNameCandidate(name) ? { name, language: "ja", complete: true } : { ...authority, complete: true });
+        this.dirty.authorities.set(uri, this.artistAuthorities.get(uri));
       }
       this.applyArtistAuthorities(names);
     }
@@ -591,20 +694,29 @@
         if (!own?.name) continue;
         const original = selectedOriginal(uri, own, this.cache, this.reverse);
         const namedOriginal = namedArtists(original, names, this.artistAuthorities, this.verifiedAliases, true);
-        this.learnVerifiedAliases(own, namedOriginal);
-        this.applyArtistAuthorities(names);
+        this.applyArtistAuthorities(names, this.learnVerifiedAliases(own, namedOriginal));
         const preferred = namedArtists(namedOriginal ? adopt(own, namedOriginal, this.artistAuthorities, this.verifiedAliases) : own, names, this.artistAuthorities, this.verifiedAliases);
         tracks.set(uri, preferred);
       }
       if (context.generation !== this.generation) throw abortError();
       this.applyArtistAuthorities(names);
       this.names = new Map(names);
-      return { tracks, sourceTracks, albums, artistNames: names, failures: context.failures, complete: !context.failures.length };
+      return {
+        tracks,
+        sourceTracks,
+        albums,
+        artistNames: names,
+        failures: context.failures,
+        complete: !context.failures.length,
+        generation: this.generation,
+        lookup: this.lookupChanges()
+      };
     }
   };
 
   // src/storage.mjs
   var DATABASE = "jp-original-title-spicetify";
+  var TABLES = ["artist_names", "previous_fields", "lookup_cache"];
   var validText = (value) => typeof value === "string" && value.trim().length > 0 && value.length <= 4096;
   var normalize = (value) => Array.isArray(value) ? value.every(validText) ? value.join(", ") : "" : value;
   var equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -631,7 +743,7 @@
   function indexedAdapter(indexedDB, name) {
     let database;
     const transaction = (mode, callback) => new Promise((resolve, reject) => {
-      const tx = database.transaction(["artist_names", "previous_fields"], mode);
+      const tx = database.transaction(TABLES, mode);
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error || new Error("Database transaction failed"));
       tx.onabort = () => reject(tx.error || new Error("Database transaction aborted"));
@@ -645,9 +757,9 @@
     return {
       async load() {
         database = await new Promise((resolve, reject) => {
-          const req = indexedDB.open(name, 1);
+          const req = indexedDB.open(name, 2);
           req.onupgradeneeded = () => {
-            for (const table of ["artist_names", "previous_fields"]) {
+            for (const table of TABLES) {
               if (!req.result.objectStoreNames.contains(table)) req.result.createObjectStore(table, { keyPath: "key" });
             }
           };
@@ -658,7 +770,7 @@
         database.onversionchange = () => database.close();
         const data = {};
         await transaction("readonly", (tx) => {
-          for (const table of ["artist_names", "previous_fields"]) {
+          for (const table of TABLES) {
             const request = tx.objectStore(table).getAll();
             request.onsuccess = () => {
               data[table] = request.result;
@@ -667,19 +779,19 @@
         });
         return data;
       },
-      async write(artists, previous) {
+      async write(artists, previous, lookup = /* @__PURE__ */ new Map()) {
         await transaction("readwrite", (tx) => {
           for (const [key2, value] of artists) tx.objectStore("artist_names").put({ key: key2, value });
           for (const [key2, value] of previous) {
             if (value) tx.objectStore("previous_fields").put({ key: key2, ...value });
             else tx.objectStore("previous_fields").delete(key2);
           }
+          for (const [key2, value] of lookup) tx.objectStore("lookup_cache").put({ key: key2, ...value });
         });
       },
       async clear() {
         await transaction("readwrite", (tx) => {
-          tx.objectStore("artist_names").clear();
-          tx.objectStore("previous_fields").clear();
+          for (const table of TABLES) tx.objectStore(table).clear();
         });
       },
       close() {
@@ -693,6 +805,7 @@
       this.adapter = adapter || indexedAdapter(indexedDB, name);
       this.artists = /* @__PURE__ */ new Map();
       this.previous = /* @__PURE__ */ new Map();
+      this.lookup = /* @__PURE__ */ new Map();
       this.queue = Promise.resolve();
       this.ready = false;
     }
@@ -700,11 +813,19 @@
       const data = await this.adapter.load();
       this.artists = new Map((data.artist_names || []).map((row) => [row.key, row.value]));
       this.previous = new Map((data.previous_fields || []).map(({ key: key2, ...value }) => [key2, value]));
+      this.lookup = new Map((data.lookup_cache || []).map(({ key: key2, ...value }) => [key2, value]));
       this.ready = true;
       return this;
     }
     getArtistNames() {
       return new Map(this.artists);
+    }
+    getLookup(scope) {
+      const result = { entities: /* @__PURE__ */ new Map(), authorities: /* @__PURE__ */ new Map(), aliases: /* @__PURE__ */ new Map() };
+      for (const row of this.lookup.values()) {
+        if (row.scope === scope && Object.hasOwn(result, row.type)) result[row.type].set(row.uri, row.value);
+      }
+      return result;
     }
     getPrevious(uri) {
       const result = {};
@@ -723,7 +844,7 @@
       });
       return result;
     }
-    commit({ artistNames = /* @__PURE__ */ new Map(), previous = [], prepare } = {}) {
+    commit({ artistNames = /* @__PURE__ */ new Map(), previous = [], lookup, prepare } = {}) {
       return this.enqueue(async () => {
         if (!this.ready) throw new Error("Plugin storage is not open");
         const artists = /* @__PURE__ */ new Map();
@@ -743,6 +864,14 @@
           const value = mergePrevious(this.previous.get(key2), items);
           if (!equal(value, this.previous.get(key2) || null)) changes.set(key2, value);
         }
+        const cached = /* @__PURE__ */ new Map();
+        if (lookup?.scope) for (const type of ["entities", "authorities", "aliases"]) {
+          for (const [uri, value] of lookup[type] ?? []) {
+            const key2 = JSON.stringify([lookup.scope, type, uri]);
+            const row = { scope: lookup.scope, type, uri, value };
+            if (!equal(row, this.lookup.get(key2))) cached.set(key2, row);
+          }
+        }
         await prepare?.({ getPrevious: (uri) => {
           const result = {};
           for (const field of ["title", "artists", "album"]) {
@@ -752,9 +881,9 @@
           }
           return result;
         } });
-        if (!artists.size && !changes.size) return;
+        if (!artists.size && !changes.size && !cached.size) return;
         try {
-          await this.adapter.write(artists, changes);
+          await this.adapter.write(artists, changes, cached);
         } catch (cause) {
           const error = new Error("Plugin storage commit failed; enhanced response withheld", { cause });
           error.code = "JPT_STORAGE";
@@ -763,6 +892,7 @@
         }
         for (const [uri, name] of artists) this.artists.set(uri, name);
         for (const [key2, value] of changes) value ? this.previous.set(key2, value) : this.previous.delete(key2);
+        for (const [key2, value] of cached) this.lookup.set(key2, value);
       });
     }
     reset() {
@@ -770,6 +900,7 @@
         await this.adapter.clear();
         this.artists.clear();
         this.previous.clear();
+        this.lookup.clear();
       });
     }
     stats() {
@@ -780,7 +911,8 @@
         previousFields: visible.length,
         suppressedFields: rows.length - visible.length,
         tracks: new Set(visible.map(([key2]) => key2.split("	")[0])).size,
-        bytes: new TextEncoder().encode(JSON.stringify([[...this.artists], rows])).length
+        lookupEntities: [...this.lookup.values()].filter((row) => row.type === "entities").length,
+        bytes: new TextEncoder().encode(JSON.stringify([[...this.artists], rows, [...this.lookup]])).length
       };
     }
     close() {
@@ -803,12 +935,46 @@
   var find = (bytes3, number) => fields(bytes3).find((field) => field.field === number);
   var stringAt = (bytes3, number) => decode(find(bytes3, number));
   var bytesEqual = (a, b) => a.length === b.length && a.every((value, i) => value === b[i]);
-  var clone = (value) => {
-    if (value instanceof Uint8Array) return value.slice();
-    if (Array.isArray(value)) return value.map(clone);
-    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key2, item]) => [key2, clone(item)]));
-    return value;
-  };
+  function draft(value) {
+    if (!value || typeof value !== "object" || ArrayBuffer.isView(value)) return { value, finish: () => value };
+    let copy;
+    const children = /* @__PURE__ */ new Map();
+    const current = () => copy || value;
+    const writable = () => copy || (copy = Array.isArray(value) ? value.slice() : { ...value });
+    const proxy = new Proxy(Array.isArray(value) ? [] : {}, {
+      get(_, key2) {
+        const item = Reflect.get(current(), key2);
+        if (!item || typeof item !== "object" || ArrayBuffer.isView(item)) return item;
+        if (!children.has(key2)) children.set(key2, draft(item));
+        return children.get(key2).value;
+      },
+      set(_, key2, item) {
+        if (Reflect.get(current(), key2) !== item) {
+          writable()[key2] = item;
+          children.delete(key2);
+        }
+        return true;
+      },
+      deleteProperty(_, key2) {
+        delete writable()[key2];
+        children.delete(key2);
+        return true;
+      },
+      has: (_, key2) => key2 in current(),
+      ownKeys: () => Reflect.ownKeys(current()),
+      getOwnPropertyDescriptor(_, key2) {
+        const descriptor = Reflect.getOwnPropertyDescriptor(current(), key2);
+        return descriptor && { ...descriptor, configurable: key2 !== "length" || !Array.isArray(value) };
+      }
+    });
+    return { value: proxy, finish() {
+      for (const [key2, child] of children) {
+        const item = child.finish();
+        if (item !== Reflect.get(current(), key2)) writable()[key2] = item;
+      }
+      return current();
+    } };
+  }
   function failure2(code, message, cause) {
     const error = new Error(message, cause ? { cause } : void 0);
     error.code = code;
@@ -1060,9 +1226,10 @@
       checkAbort(signal);
       let preparationFailed = false;
       try {
-        await store.commit({ artistNames: resolved.artistNames || /* @__PURE__ */ new Map(), previous: observationDeltas(observations), prepare: async (projected) => {
+        await store.commit({ artistNames: resolved.artistNames || /* @__PURE__ */ new Map(), previous: observationDeltas(observations), lookup: resolved.lookup, prepare: async (projected) => {
           try {
             checkAbort(signal);
+            resolver.assertCurrent?.(resolved);
             await prepare?.(projected);
             checkAbort(signal);
           } catch (error) {
@@ -1070,6 +1237,7 @@
             throw error;
           }
         } });
+        resolver.didPersist?.(resolved.lookup);
       } catch (error) {
         if (preparationFailed) throw error;
         throw failure2("JPT_STORAGE_FAILED", "Metadata storage transaction failed", error);
@@ -1149,11 +1317,12 @@
         })), output);
         await validate?.(finalOutput);
       });
-      return finalOutput;
+      return bytesEqual(bytes3, finalOutput) ? bytes3 : finalOutput;
     }
     async function rewriteStructured(value, options = {}, mode = "json") {
       const { signal, priority = mode === "native" ? 3 : 1 } = options;
-      const output = clone(value);
+      const candidate = draft(value);
+      const output = candidate.value;
       const uris = /* @__PURE__ */ new Set();
       const native = { tracks: /* @__PURE__ */ new Map(), albums: /* @__PURE__ */ new Map() };
       const collect = (object, inheritedURI, inheritedKind, keyHint) => {
@@ -1178,7 +1347,7 @@
           collect(item, uri, nextKind, key2);
         }
       };
-      collect(output);
+      collect(value);
       if (mode === "native") resolver.ingest?.(native);
       const suppliedURI = entityURI(options.uri || options.trackURI || options.trackUri);
       if (suppliedURI) uris.add(suppliedURI);
@@ -1200,14 +1369,14 @@
           const raw = object.extensionResult.value;
           const rewritten = parseGuard(() => rewriteWireValue(raw, kind, uri, resolved), raw);
           if ([10, 97, 128, 178].includes(kind)) parseGuard(() => capture(observations, uri, previousWire(raw, kind), previousWire(rewritten, kind), kind === 178 ? 3 : kind === 10 ? 2 : 1));
-          object.extensionResult.value = rewritten;
+          object.extensionResult.value = bytesEqual(raw, rewritten) ? raw : rewritten;
         }
         if (uri && object.value instanceof Uint8Array && (object.typeUrl || object.type_url)) {
           const inferredKind = kind || (/\.Track$/.test(object.typeUrl || object.type_url) ? 10 : void 0);
           const raw = object.value;
           const rewritten = parseGuard(() => rewriteWireValue(raw, inferredKind, uri, resolved), raw);
           if ([10, 97, 128, 178].includes(inferredKind)) parseGuard(() => capture(observations, uri, previousWire(raw, inferredKind), previousWire(rewritten, inferredKind), inferredKind === 178 ? 3 : inferredKind === 10 ? 2 : 1));
-          object.value = rewritten;
+          object.value = bytesEqual(raw, rewritten) ? raw : rewritten;
           if (inferredKind === 186) credits.push({ holder: object, uri, raw: true });
         }
         const suppliedTrackCarrier = suppliedURI?.startsWith("spotify:track:") && uri === suppliedURI && keyHint === "trackUnion" && typeof displayName(object) === "string";
@@ -1225,14 +1394,19 @@
         }
       };
       visit(output, suppliedURI, void 0);
+      let finalOutput;
       await commit(resolved, observations, signal, async ({ getPrevious }) => {
         for (const item of credits) {
-          if (item.raw) item.holder.value = parseGuard(() => creditsWire(item.holder.value, getPrevious(item.uri)), item.holder.value);
-          else addCredits(item.value, getPrevious(item.uri), item.graphQL);
+          if (item.raw) {
+            const raw = item.holder.value;
+            const rewritten = parseGuard(() => creditsWire(raw, getPrevious(item.uri)), raw);
+            item.holder.value = bytesEqual(raw, rewritten) ? raw : rewritten;
+          } else addCredits(item.value, getPrevious(item.uri), item.graphQL);
         }
-        await options.validate?.(output);
+        finalOutput = candidate.finish();
+        await options.validate?.(finalOutput);
       });
-      return output;
+      return finalOutput;
     }
     return {
       rewriteJSON: (value, options) => rewriteStructured(value, options, "json"),
@@ -1925,6 +2099,7 @@
       if (!api?.expire) throw new Error("Metadata refresh is unavailable in this Spotify client");
       await api.expire(...uris.map((uri) => [uri, 178, ...uri.startsWith("spotify:track:") ? [10, 186] : uri.startsWith("spotify:album:") ? [9] : [8]]));
       resolver.clear();
+      resolver.restore?.();
       await hooks.refresh?.();
       return uris.length;
     }
@@ -1981,7 +2156,7 @@
       const summary = element("p", void 0, body);
       const update = () => {
         const s = store.stats();
-        summary.textContent = `${s.artistNames} artist names \xB7 ${s.previousFields} previous fields \xB7 ${s.tracks} tracks \xB7 ${(s.bytes / 1024).toFixed(1)} KB stored data (estimate)`;
+        summary.textContent = `${s.lookupEntities ?? 0} cached tracks/albums \xB7 ${s.artistNames} artist names \xB7 ${s.previousFields} previous fields \xB7 ${(s.bytes / 1024).toFixed(1)} KB stored data (estimate)`;
       };
       update();
       checkbox(body, "Strict Mode", settings.strict, (value) => settings.update({ strict: value }));
@@ -2056,8 +2231,8 @@
   }
 
   // src/index.mjs
-  var BUILD = false ? "source-development" : "21d8abd0f630";
-  var VERSION = false ? void 0 : "1.0.0";
+  var BUILD = false ? "source-development" : "392f7ff17dc7";
+  var VERSION = false ? void 0 : "1.0.1";
   var CHANNEL = VERSION ? "release" : "local-development";
   var NAME = "JP Original Title (Spicetify)";
   var STARTUP = /* @__PURE__ */ Symbol.for("JPOriginalTitle.startup");
@@ -2121,7 +2296,9 @@
       }
       const originalFetch = host.fetch.bind(host);
       const request = (components.createRequest ?? createRequest)({ Spicetify: S, fetch: originalFetch, log });
-      const resolver = new (components.Resolver ?? Resolver)({ request, store, isStrict: () => settings.strict, log });
+      const market = /^[A-Z]{2}$/.test(S.Platform.Session?.market ?? "") ? S.Platform.Session.market : "US";
+      const product = S.Platform.initialProductState?.product === "free" ? "free" : "premium";
+      const resolver = new (components.Resolver ?? Resolver)({ request, store, scope: `${market}:${product}`, isStrict: () => settings.strict, log });
       cleanups.push(() => resolver.clear());
       const transformer = (components.createTransformer ?? createTransformer)({ resolver, store, isStrict: () => settings.strict, log });
       const hooks = (components.installHooks ?? installHooks)({ Spicetify: S, transformer, isStrict: () => settings.strict, log });

@@ -53,6 +53,30 @@ test('GraphQL names are rewritten, playback identity and input are preserved', a
   assert.equal(commits.length, 1);
   assert.deepEqual(commits[0].previous.find(item => item.field === 'artists').value, ['Artist']);
 });
+
+test('copy-on-write retains unchanged branches and a fully unchanged response', async () => {
+  const { transformer } = setup();
+  const input = { data: { trackUnion: jsonTrack() }, untouched: { items: [{ count: 7n }], bytes: new Uint8Array([1, 2]) } };
+  const output = await transformer.rewriteJSON(input);
+  assert.notEqual(output, input);
+  assert.equal(output.untouched, input.untouched);
+  assert.equal(output.data.trackUnion.playback, input.data.trackUnion.playback);
+  assert.equal(input.data.trackUnion.name, 'Roman');
+  assert.equal(await transformer.rewriteJSON(output), output);
+});
+
+test('copy-on-write accepts frozen input and leaves unchanged arrays untouched', async () => {
+  const { transformer } = setup();
+  const input = jsonTrack();
+  Object.freeze(input.artists.items[0].profile);
+  Object.freeze(input.artists.items);
+  Object.freeze(input.albumOfTrack);
+  Object.freeze(input);
+  const output = await transformer.rewriteJSON(input);
+  assert.equal(output.artists.items[0].profile.name, '歌手');
+  assert.equal(input.artists.items[0].profile.name, 'Artist');
+  assert.equal(output.playback.restrictions, input.playback.restrictions);
+});
 test('Credits uses committed previous values and deduplicates matching roles', async () => {
   const { transformer, saved } = setup();
   const track = jsonTrack();

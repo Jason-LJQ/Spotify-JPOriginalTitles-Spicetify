@@ -1,19 +1,19 @@
 {
   "name": "JP Original Title (Spicetify)",
   "channel": "release",
-  "version": "1.0.0",
-  "buildID": "21d8abd0f630",
+  "version": "1.0.1",
+  "buildID": "392f7ff17dc7",
   "iosBaseline": "v7.0.2",
-  "sha256": "5bae4ccf64f2cf9e9ba36f71909aea3b51d5c5785f4d188d5271734639231d1f",
-  "bytes": 109126,
+  "sha256": "dc00871a830f78b9cc1b4f9660bd45b7689b7c4ae3dc6e0016cab974b8db7971",
+  "bytes": 118095,
   "sources": {
     "hooks.mjs": "cad1fd983bd46c87ea97a417366d7c4dbb488a6e49ebcbb7859ac4063d7c8d3b",
-    "index.mjs": "00216808659fe6c5c42464ed9b2c73777381689e5375918f3c584851a97ed467",
-    "management.mjs": "d0bf6c8866271f5bece74059a0eba4341f8adbf5bd1cc5db042f5cf160ec9579",
+    "index.mjs": "278efd9504d2f8f33f2cac8c81d3b72d8d54217d6450c34dd955edcd256297da",
+    "management.mjs": "5b94cec812b56aa4bb7b79173498b22d878d511c1d6c8466f94653624727604a",
     "network.mjs": "b83fdb00d900d9cb2f75c5b737e5b12355ae57fe7b78f8d285dd2a76dd7eb309",
-    "resolver.mjs": "d133ac486dd526b7e3d20242d7c2900d698cfc6566e89603bee2101affd5a44a",
-    "storage.mjs": "5f28ef85eca32fa9f7dc5d22068cb20a5183abc4603cf20499fcc3c6efe2e9b2",
-    "transform.mjs": "04de2638b51c66cc4c452a6a6ab885cfb07e9441dc09c83c2bec76b1b53981ce",
+    "resolver.mjs": "db1c8da9a0f61d516415eeac5b01516cae9161efd31b3bd66ca740ea3ba81fca",
+    "storage.mjs": "d66e9b62aefecfed01ac7037f09ea45c0389db19e9b187e5782d1e088a50d5b6",
+    "transform.mjs": "748cf3a9cc600db4253144ebad50e3fbd8a7f238f331981e499af74b09053daf",
     "wire-overlay.mjs": "dfdbc05e404c87d3cd99ae516fdd282780e2b465bb45b5daf3ecb437aa5286ce",
     "wire.mjs": "8ab34337735c714de00d05bf9bce0839a2a02de155e85b93daea2b57932aaef3"
   }

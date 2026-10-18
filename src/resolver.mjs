@@ -92,12 +92,40 @@ function failure(message, uris, cause) {
 function abortError() { const error = new Error('Lookup cancelled'); error.name = 'AbortError'; return error; }
 
 export class Resolver {
-  constructor({ request, store, isStrict = () => false, log = () => {} }) {
+  constructor({ request, store, isStrict = () => false, log = () => {}, scope = 'US:premium' }) {
     this.request = request; this.store = store; this.isStrict = isStrict; this.log = log;
+    this.scope = `lookup-v1:zh-Hans,ja:${scope}`;
     this.cache = new Map(); this.clients = new Map(); this.reverse = new Map(); this.names = new Map(); this.artistAuthorities = new Map(); this.verifiedAliases = new Map(); this.observedUris = new Set();
     this.active = 0; this.queue = []; this.requests = 0; this.maxActive = 0; this.generation = 0;
+    this.inFlight = new Map();
+    this.dirty = { entities: new Map(), authorities: new Map(), aliases: new Map() };
+    this.restore();
   }
-  clear() { this.generation++; this.cache.clear(); this.clients.clear(); this.reverse.clear(); this.names.clear(); this.artistAuthorities.clear(); this.verifiedAliases.clear(); this.observedUris.clear(); }
+  restore() {
+    const saved = this.store?.getLookup?.(this.scope);
+    for (const [uri, value] of saved?.entities ?? []) this.cache.set(uri, value);
+    for (const [uri, value] of saved?.authorities ?? []) this.artistAuthorities.set(uri, value);
+    for (const [uri, value] of saved?.aliases ?? []) this.verifiedAliases.set(uri, value);
+    this.index(this.cache);
+  }
+  clear() {
+    this.generation++;
+    for (const operation of new Set(this.inFlight.values())) operation.controller.abort();
+    this.inFlight.clear();
+    for (const map of Object.values(this.dirty)) map.clear();
+    this.cache.clear(); this.clients.clear(); this.reverse.clear(); this.names.clear(); this.artistAuthorities.clear(); this.verifiedAliases.clear(); this.observedUris.clear();
+  }
+  lookupChanges() {
+    return { scope: this.scope, generation: this.generation,
+      ...Object.fromEntries(Object.entries(this.dirty).map(([key, map]) => [key, new Map(map)])) };
+  }
+  didPersist(lookup) {
+    if (lookup?.generation !== this.generation) return;
+    for (const [type, pending] of Object.entries(this.dirty)) for (const [uri, value] of lookup[type]) {
+      if (pending.get(uri) === value) pending.delete(uri);
+    }
+  }
+  assertCurrent(result) { if (result.generation !== undefined && result.generation !== this.generation) throw abortError(); }
   stats() { return { cachedEntities: this.cache.size, clientEntities: this.clients.size, viewedEntities: this.observedUris.size, artistNames: this.names.size, verifiedAliases: this.verifiedAliases.size, active: this.active, queued: this.queue.length, requests: this.requests, maxActive: this.maxActive }; }
   index(map) {
     for (const [uri, track] of map) {
@@ -116,14 +144,20 @@ export class Resolver {
     this.maxActive = Math.max(this.maxActive, this.active);
     try {
       if (context.signal?.aborted || context.generation !== this.generation) throw abortError();
+      const unused = context.unused?.();
+      if (unused) { this.record(context, unused, true); throw unused; }
       if (context.stopped) throw context.stopped;
       this.requests++; return await callback();
+    } catch (error) {
+      if ([401, 403, 429].includes(error.status ?? error.statusCode) || error.name === 'AbortError' || error.offline) context.onRejected?.(error);
+      throw error;
     } finally { if (this.queue.length) this.queue.shift()(); else this.active--; }
   }
   record(context, error, terminal = false) {
     if (!error) return;
     if (!context.failures.includes(error)) context.failures.push(error);
     if (terminal || this.isStrict()) context.stopped = error;
+    context.onFailure?.(error, !!context.stopped);
   }
   async attempt(uris, language, context, artist) {
     const values = new Map(), retry = new Set(); let error, whole = false, terminal = false;
@@ -156,7 +190,10 @@ export class Resolver {
     }
     if (whole) for (const uri of uris) retry.add(uri);
     if (terminal) this.record(context, error, true);
-    if (!artist && context.generation === this.generation) { for (const [uri, value] of values) this.cache.set(uri, value); this.index(values); }
+    if (!artist && !context.signal?.aborted && context.generation === this.generation) {
+      for (const [uri, value] of values) { this.cache.set(uri, value); this.dirty.entities.set(uri, value); }
+      this.index(values);
+    }
     return { values, retry, error, whole, terminal };
   }
   async resolveAttempt(uris, language, context, artist) {
@@ -198,14 +235,67 @@ export class Resolver {
   async query(wanted, context, { language = 'zh-Hans', artist = false, parallel = true, cached = true } = {}) {
     const uris = unique(wanted).filter(uri => (isTrack(uri) || isAlbum(uri) || isArtist(uri)) && (!cached || artist || !this.cache.has(uri)));
     const out = new Map(), batches = chunks(uris, 256);
-    const run = async batch => { if (context.stopped) return; const values = await this.batch(batch, language, context, artist); for (const [uri, value] of values) out.set(uri, value); };
+    const run = async batch => {
+      if (context.stopped) return;
+      if (context.signal?.aborted || context.generation !== this.generation) { this.record(context, abortError(), true); return; }
+      const operations = new Set(), missing = [];
+      const key = uri => `${context.generation}:${language}:${artist ? 8 : isAlbum(uri) ? 9 : 10}:${uri}`;
+      for (const uri of batch) {
+        if (cached && !artist && this.cache.has(uri)) continue;
+        const operation = this.inFlight.get(key(uri));
+        if (operation) operations.add(operation); else missing.push(uri);
+      }
+      if (missing.length) {
+        const controller = new AbortController();
+        const shared = { signal: controller.signal, failures: [], stopped: undefined, generation: context.generation };
+        const operation = { controller, consumers: new Set(), keys: missing.map(key), context: shared };
+        shared.onFailure = (error, terminal) => {
+          for (const consumer of operation.consumers) this.record(consumer.context, error, terminal);
+        };
+        shared.onRejected = error => { for (const consumer of operation.consumers) consumer.context.stopped = error; };
+        shared.unused = () => [...operation.consumers].every(consumer => consumer.context.stopped || consumer.context.signal?.aborted)
+          ? [...operation.consumers][0]?.context.stopped || abortError() : undefined;
+        for (const name of operation.keys) this.inFlight.set(name, operation);
+        operation.promise = Promise.resolve().then(() => this.batch(missing, language, shared, artist)).finally(() => {
+          for (const name of operation.keys) if (this.inFlight.get(name) === operation) this.inFlight.delete(name);
+        });
+        operations.add(operation);
+      }
+      await Promise.all([...operations].map(async operation => {
+        const consumer = { context };
+        operation.consumers.add(consumer);
+        let onAbort;
+        const cancelled = new Promise((_, reject) => {
+          onAbort = () => reject(abortError());
+          context.signal?.addEventListener('abort', onAbort, { once: true });
+          if (context.signal?.aborted) onAbort();
+        });
+        try {
+          const values = await Promise.race([operation.promise, cancelled]);
+          for (const error of operation.context.failures) this.record(context, error, operation.context.stopped === error);
+          for (const [uri, value] of values) if (batch.includes(uri)) out.set(uri, value);
+        } catch (error) { this.record(context, error, true); }
+        finally {
+          context.signal?.removeEventListener('abort', onAbort);
+          operation.consumers.delete(consumer);
+          if (!operation.consumers.size) {
+            operation.controller.abort();
+            for (const name of operation.keys) if (this.inFlight.get(name) === operation) this.inFlight.delete(name);
+          }
+        }
+      }));
+    };
     if (parallel) await Promise.all(batches.map(run));
     else for (const batch of batches) { await run(batch); if (context.stopped) break; }
     return out;
   }
   async associated(uris, context) {
     const albums = new Set();
-    for (const uri of uris) { const track = this.cache.get(uri); if (isAlbum(uri)) albums.add(uri); else if (track && !hasCJK(track.name) && track.isrc && track.albumURI) albums.add(track.albumURI); }
+    for (const uri of uris) {
+      const track = this.cache.get(uri), direct = this.cache.get(romanizedCanonical(uri, track));
+      if (isAlbum(uri)) albums.add(uri);
+      else if (track && !hasCJK(track.name) && track.isrc && track.albumURI && !(direct && hasCJK(direct.name) && directCompatible(track, direct))) albums.add(track.albumURI);
+    }
     await this.query(albums, context);
     const linked = [...albums].flatMap(uri => { const a = this.cache.get(uri); return a && !hasCJK(a.name) && isAlbum(a.originalURI) && a.originalURI !== uri ? [a.originalURI] : []; });
     await this.query(linked, context);
@@ -233,15 +323,18 @@ export class Resolver {
     await this.query(albums, context);
     await this.query([...albums].flatMap(uri => this.cache.get(uri)?.tracks ?? []), context);
   }
-  applyArtistAuthorities(names) {
-    for (const [uri, alias] of this.verifiedAliases) if (alias.name) names.set(uri, alias.name);
-    for (const [uri, authority] of this.artistAuthorities) {
+  applyArtistAuthorities(names, wanted = new Set([...this.verifiedAliases.keys(), ...this.artistAuthorities.keys()])) {
+    for (const uri of wanted) {
+      const alias = this.verifiedAliases.get(uri), authority = this.artistAuthorities.get(uri);
+      if (alias?.name) names.set(uri, alias.name);
+      if (!authority) continue;
       if (!authority.name) names.delete(uri);
       else names.set(uri, hasCJK(authority.name) ? authority.name : this.verifiedAliases.get(uri)?.name || authority.name);
     }
   }
   learnVerifiedAliases(own, original) {
-    if (!own?.isrc || own.isrc !== original?.isrc || !own.duration || own.duration !== original.duration || !safeArtistPositions(own, original)) return;
+    const changed = new Set();
+    if (!own?.isrc || own.isrc !== original?.isrc || !own.duration || own.duration !== original.duration || !safeArtistPositions(own, original)) return changed;
     for (let i = 0; i < own.artists.length; i++) {
       const source = own.artists[i], candidate = original.artists[i], authority = this.artistAuthorities.get(source.uri);
       if (hasCJK(source.name) || !hasCJK(candidate.name) || authority && (!authority.name || hasCJK(authority.name))) continue;
@@ -249,11 +342,14 @@ export class Resolver {
       if (prior?.conflict) continue;
       if (prior && prior.name !== candidate.name) this.verifiedAliases.set(source.uri, { conflict: true });
       else if (!prior) this.verifiedAliases.set(source.uri, { name: candidate.name, sourceTrackURI: own.uri, originalTrackURI: original.uri, isrc: own.isrc, duration: own.duration });
+      if (this.verifiedAliases.get(source.uri) !== prior) {
+        changed.add(source.uri); this.dirty.aliases.set(source.uri, this.verifiedAliases.get(source.uri));
+      }
     }
+    return changed;
   }
   async artistOriginals(wanted, names, context) {
-    // Persistent names predate provenance. Verify each requested URI once per
-    // process before a positional alias can influence its independently known name.
+    // Legacy name strings alone are not independent identity evidence.
     const missing = unique(wanted).filter(uri => !this.artistAuthorities.get(uri)?.complete);
     const zh = await this.query(missing, context, { artist: true, parallel: false });
     if (context.stopped || context.generation !== this.generation) return;
@@ -262,6 +358,7 @@ export class Resolver {
       if (!zh.has(uri)) continue;
       const name = zh.get(uri);
       this.artistAuthorities.set(uri, { name, language: 'zh-Hans', complete: !name || hasCJK(name) });
+      this.dirty.authorities.set(uri, this.artistAuthorities.get(uri));
       if (name?.length && !hasCJK(name)) japanese.push(uri);
     }
     const ja = await this.query(japanese, context, { artist: true, language: 'ja', parallel: false });
@@ -273,6 +370,7 @@ export class Resolver {
       this.artistAuthorities.set(uri, japaneseNameCandidate(name)
         ? { name, language: 'ja', complete: true }
         : { ...authority, complete: true });
+      this.dirty.authorities.set(uri, this.artistAuthorities.get(uri));
     }
     this.applyArtistAuthorities(names);
   }
@@ -299,15 +397,15 @@ export class Resolver {
       if (!own?.name) continue;
       const original = selectedOriginal(uri, own, this.cache, this.reverse);
       const namedOriginal = namedArtists(original, names, this.artistAuthorities, this.verifiedAliases, true);
-      this.learnVerifiedAliases(own, namedOriginal);
-      this.applyArtistAuthorities(names);
+      this.applyArtistAuthorities(names, this.learnVerifiedAliases(own, namedOriginal));
       const preferred = namedArtists(namedOriginal ? adopt(own, namedOriginal, this.artistAuthorities, this.verifiedAliases) : own, names, this.artistAuthorities, this.verifiedAliases);
       tracks.set(uri, preferred);
     }
     if (context.generation !== this.generation) throw abortError();
     this.applyArtistAuthorities(names);
     this.names = new Map(names);
-    return { tracks, sourceTracks, albums, artistNames: names, failures: context.failures, complete: !context.failures.length };
+    return { tracks, sourceTracks, albums, artistNames: names, failures: context.failures, complete: !context.failures.length,
+      generation: this.generation, lookup: this.lookupChanges() };
   }
 }
 

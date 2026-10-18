@@ -56,7 +56,9 @@ export async function start({ host = globalThis, components = {}, now = Date.now
   if (disposed) { store.close(); return null; }
   const originalFetch = host.fetch.bind(host);
   const request = (components.createRequest ?? createRequest)({ Spicetify: S, fetch: originalFetch, log });
-  const resolver = new (components.Resolver ?? Resolver)({ request, store, isStrict: () => settings.strict, log });
+  const market = /^[A-Z]{2}$/.test(S.Platform.Session?.market ?? '') ? S.Platform.Session.market : 'US';
+  const product = S.Platform.initialProductState?.product === 'free' ? 'free' : 'premium';
+  const resolver = new (components.Resolver ?? Resolver)({ request, store, scope: `${market}:${product}`, isStrict: () => settings.strict, log });
   cleanups.push(() => resolver.clear());
   const transformer = (components.createTransformer ?? createTransformer)({ resolver, store, isStrict: () => settings.strict, log });
   const hooks = (components.installHooks ?? installHooks)({ Spicetify: S, transformer, isStrict: () => settings.strict, log });

@@ -4,19 +4,22 @@ import { Store } from '../src/storage.mjs';
 
 const uri = 'spotify:track:synthetic';
 function adapter() {
-  const disk = { artist_names: [], previous_fields: [] };
+  const disk = { artist_names: [], previous_fields: [], lookup_cache: [] };
   return {
     fail: false,
     async load() { return structuredClone(disk); },
-    async write(artists, previous) {
+    async write(artists, previous, lookup = new Map()) {
       if (this.fail) throw new Error('Disk failure');
       const a = new Map(disk.artist_names.map(row => [row.key, row]));
       const p = new Map(disk.previous_fields.map(row => [row.key, row]));
       for (const [key, value] of artists) a.set(key, { key, value });
       for (const [key, value] of previous) value ? p.set(key, { key, ...value }) : p.delete(key);
       disk.artist_names = [...a.values()]; disk.previous_fields = [...p.values()];
+      const l = new Map(disk.lookup_cache.map(row => [row.key, row]));
+      for (const [key, value] of lookup) l.set(key, { key, ...value });
+      disk.lookup_cache = [...l.values()];
     },
-    async clear() { disk.artist_names = []; disk.previous_fields = []; }
+    async clear() { disk.artist_names = []; disk.previous_fields = []; disk.lookup_cache = []; }
   };
 }
 
@@ -102,4 +105,24 @@ test('validation still runs for unchanged transactions and observes serialized p
   });
   await Promise.all([first, second]);
   assert.equal(calls, 1);
+});
+
+test('lookup evidence is atomic with previous fields and survives reopening in its own scope', async () => {
+  const persistence = adapter();
+  let store = await new Store({ adapter: persistence }).open();
+  const lookup = { scope: 'one', entities: new Map([[uri, { name: 'Original' }]]), authorities: new Map(), aliases: new Map() };
+  await assert.rejects(store.commit({ lookup, previous: [{ uri, field: 'title', value: 'Raw', now: 'Original' }], prepare() { throw new Error('Invalid delivery'); } }));
+  assert.equal(store.getLookup('one').entities.size, 0);
+  persistence.fail = true;
+  await assert.rejects(store.commit({ lookup }), { code: 'JPT_STORAGE' });
+  persistence.fail = false;
+  await store.commit({ lookup, previous: [{ uri, field: 'title', value: 'Raw', now: 'Original' }] });
+  store = await new Store({ adapter: persistence }).open();
+  assert.equal(store.getLookup('one').entities.get(uri).name, 'Original');
+  assert.equal(store.getLookup('two').entities.size, 0);
+  assert.equal(store.getPrevious(uri).title, 'Raw');
+  await store.reset();
+  store = await new Store({ adapter: persistence }).open();
+  assert.equal(store.getLookup('one').entities.size, 0);
+  assert.deepEqual(store.getPrevious(uri), {});
 });
