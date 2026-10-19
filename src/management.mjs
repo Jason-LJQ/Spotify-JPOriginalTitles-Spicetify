@@ -12,12 +12,13 @@ export async function applyResetActions({ plugin, metadata, store, resolver, ref
 }
 
 export function createSettings(storage = globalThis.localStorage) {
-  let value = { strict: false, logging: false, installChoice: false };
+  let value = { strict: false, logging: false, installChoice: false, combineTitles: true };
   try { value = { ...value, ...JSON.parse(storage.getItem(SETTINGS_KEY) || '{}') }; } catch { /* Retain safe defaults. */ }
   return {
     get strict() { return value.strict === true; },
     get logging() { return value.logging === true; },
     get installChoice() { return value.installChoice === true; },
+    get combineTitles() { return value.combineTitles !== false; },
     snapshot() { return { ...value }; },
     update(patch) { const next = { ...value, ...patch }; storage.setItem(SETTINGS_KEY, JSON.stringify(next)); value = next; }
   };
@@ -68,6 +69,19 @@ export function installManagement({ Spicetify: S, store, resolver, hooks, settin
     const summary = element('p', undefined, body);
     const update = () => { const s = store.stats(); summary.textContent = `${s.lookupEntities ?? 0} cached tracks/albums · ${s.artistNames} artist names · ${s.previousFields} previous fields · ${(s.bytes / 1024).toFixed(1)} KB stored data (estimate)`; };
     update();
+    const combined = checkbox(body, 'Show original and previous song titles', settings.combineTitles, async value => {
+      combined.disabled = true;
+      try {
+        settings.update({ combineTitles: value });
+        await refreshMetadata();
+        notify('Title display saved. Reopen the page to update existing titles.');
+      } catch (error) {
+        combined.checked = settings.combineTitles;
+        log('title-display-refresh-error', error.message);
+        notify('Reopen pages or restart Spotify to apply the saved title display setting.');
+      } finally { combined.disabled = false; }
+    });
+    element('p', 'Show changed songs as Original title - Previous title. Turn off to show only the original title.', body);
     checkbox(body, 'Strict Mode', settings.strict, value => settings.update({ strict: value }));
     element('p', 'Strict Mode blocks enhanced responses when a lookup or parsing fails. It can prevent pages from loading.', body);
     checkbox(body, 'Diagnostic logging', settings.logging, value => settings.update({ logging: value }));

@@ -60,7 +60,7 @@ export async function start({ host = globalThis, components = {}, now = Date.now
   const product = S.Platform.initialProductState?.product === 'free' ? 'free' : 'premium';
   const resolver = new (components.Resolver ?? Resolver)({ request, store, scope: `${market}:${product}`, isStrict: () => settings.strict, log });
   cleanups.push(() => resolver.clear());
-  const transformer = (components.createTransformer ?? createTransformer)({ resolver, store, isStrict: () => settings.strict, log });
+  const transformer = (components.createTransformer ?? createTransformer)({ resolver, store, isStrict: () => settings.strict, combineTitles: () => settings.combineTitles, log });
   const hooks = (components.installHooks ?? installHooks)({ Spicetify: S, transformer, isStrict: () => settings.strict, log });
   cleanups.push(() => hooks.dispose());
   const management = (components.installManagement ?? installManagement)({ Spicetify: S, store, resolver, hooks, settings, log, diagnostics, buildID: BUILD, version: VERSION, channel: CHANNEL });

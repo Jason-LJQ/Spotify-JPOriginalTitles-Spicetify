@@ -32,7 +32,7 @@ This file describes internal interfaces; user-facing documentation is README.md.
   client-requested entities for explicit metadata refresh. Mac recording and
   verified artist-alias safeguards supplement the iOS baseline; see the local
   investigation log for the exact behavior and evidence boundaries.
-- `transform.mjs`: exports `createTransformer({resolver,store,isStrict,log})`
+- `transform.mjs`: exports `createTransformer({resolver,store,isStrict,combineTitles,log})`
   returning `{rewriteJSON, rewriteNative, rewritePlayer, rewriteMetadata}`.
   All methods are asynchronous, leave input unmodified, commit old-value,
   lookup-evidence and artist-name deltas before delivery, and return the same envelope
@@ -42,6 +42,11 @@ This file describes internal interfaces; user-facing documentation is README.md.
   messages. `rewriteMetadata(bytes,{signal})` handles HTTP protobuf responses.
   Unrelated fields, local files and user playlist names are preserved. Structured
   responses use copy-on-write; unchanged branches retain their original identity.
+  `combineTitles` reads the desktop display preference. The entrypoint supplies
+  the default-enabled setting; standalone transformer callers retain plain-title
+  behavior unless they opt in. Title presentation runs against projected previous
+  values before final delivery validation. Stored old/current fields and resolver
+  evidence stay unformatted; repeated delivery cannot accumulate title suffixes.
 - `storage.mjs`: exports class `Store`, async `open()`, `commit({artistNames,
   previous,lookup})`, `reset()`, `stats()`, `getArtistNames():Map`, `getPrevious(uri)`,
   `getLookup(scope)`. IndexedDB schema 2 adds `lookup_cache` while retaining the

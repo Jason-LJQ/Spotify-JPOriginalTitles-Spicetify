@@ -135,8 +135,15 @@ export class Resolver {
     }
   }
   ingest(decoded) {
-    for (const map of [decoded.tracks, decoded.albums]) for (const [uri, value] of map ?? []) this.clients.set(uri, value);
-    this.index(decoded.tracks ?? new Map());
+    const tracks = new Map();
+    for (const map of [decoded.tracks, decoded.albums]) for (const [uri, raw] of map ?? []) {
+      const previous = isTrack(uri) ? this.store?.getPreviousRecord?.(uri, 'title') : undefined;
+      // Strip only an exact presentation proven by our persisted raw/current pair.
+      const value = previous?.now && previous.value && raw.name === `${previous.now} - ${previous.value}` ? { ...raw, name: previous.now } : raw;
+      this.clients.set(uri, value);
+      if (isTrack(uri)) tracks.set(uri, value);
+    }
+    this.index(tracks);
   }
   async slot(context, callback) {
     if (this.active >= 3) await new Promise(resolve => this.queue.push(resolve));

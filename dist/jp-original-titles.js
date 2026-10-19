@@ -1,4 +1,4 @@
-// JP Original Title (Spicetify) v1.0.1
+// JP Original Title (Spicetify) v1.1.0
 (() => {
   // src/wire.mjs
   var encoder = new TextEncoder();
@@ -379,8 +379,14 @@
       }
     }
     ingest(decoded) {
-      for (const map of [decoded.tracks, decoded.albums]) for (const [uri, value] of map ?? []) this.clients.set(uri, value);
-      this.index(decoded.tracks ?? /* @__PURE__ */ new Map());
+      const tracks = /* @__PURE__ */ new Map();
+      for (const map of [decoded.tracks, decoded.albums]) for (const [uri, raw] of map ?? []) {
+        const previous = isTrack(uri) ? this.store?.getPreviousRecord?.(uri, "title") : void 0;
+        const value = previous?.now && previous.value && raw.name === `${previous.now} - ${previous.value}` ? { ...raw, name: previous.now } : raw;
+        this.clients.set(uri, value);
+        if (isTrack(uri)) tracks.set(uri, value);
+      }
+      this.index(tracks);
     }
     async slot(context, callback) {
       if (this.active >= 3) await new Promise((resolve) => this.queue.push(resolve));
@@ -1059,14 +1065,25 @@
       return { ...chosen, ...finals.size > 1 || originals.size > 1 || highest.some((item) => item.conflict) ? { conflict: true } : {} };
     });
   }
-  function capture(observations, uri, before, after, priority) {
+  function capture(observations, uri, before, after, priority, previousTitle) {
     if (!uri?.startsWith("spotify:track:")) return;
+    if (hasText(previousTitle) && before.title === `${after.title} - ${previousTitle}`) before = { ...before, title: after.title };
     for (const field of ["title", "artists", "album"]) {
       if (!(field in before) && !(field in after)) continue;
       const old = before[field] ?? (field === "artists" ? [] : "");
       const now = after[field] ?? (field === "artists" ? [] : "");
       observations.push({ uri, field, value: old, now, priority });
     }
+  }
+  function presentWireTitle(bytes3, kind, uri, resolved, title) {
+    if (!uri?.startsWith("spotify:track:") || !mapGet(resolved.tracks, uri) || ![10, 97, 128, 178].includes(kind)) return bytes3;
+    const field = kind === 128 ? 1 : 2;
+    const old = stringAt(bytes3, field);
+    const name = title(uri, old);
+    if (!hasText(old) || name === old) return bytes3;
+    let output = replaceString(bytes3, field, name);
+    if (kind === 97 && stringAt(bytes3, 6) === old) output = replaceString(output, 6, name);
+    return output;
   }
   function previousEntries(previous) {
     const result = [];
@@ -1179,11 +1196,12 @@
       return field.raw;
     }));
   }
-  function typedRewrite(object, uri, resolved, priority, observations, kind) {
+  function typedRewrite(object, uri, resolved, priority, observations, kind, previousTitle) {
     const before = previousNames(object);
     const preferred = mapGet(resolved.tracks, uri);
     if (uri.startsWith("spotify:track:") && preferred) {
       setName(object, preferred.name);
+      if (kind === 97 && hasText(preferred.name) && object.title === before.title) object.title = preferred.name;
       for (const key2 of ["originalTitle", "original_title"]) if (key2 in object && hasText(preferred.originalTitle)) object[key2] = preferred.originalTitle;
       for (const key2 of ["versionTitle", "version_title"]) if (key2 in object && hasText(preferred.originalTitle)) object[key2] = preferred.versionTitle || "";
       const album = object.albumOfTrack ?? object.album ?? object.contentHierarchyParent;
@@ -1204,11 +1222,20 @@
       setName(object, name);
       if (kind === 97 && hasText(name) && object.title === old) object.title = name;
     }
-    capture(observations, uri, before, previousNames(object), priority);
+    capture(observations, uri, before, previousNames(object), priority, previousTitle);
   }
-  function createTransformer({ resolver, store, isStrict = () => false, log = () => {
+  function createTransformer({ resolver, store, isStrict = () => false, combineTitles = () => false, log = () => {
   } }) {
     const strict = () => typeof isStrict === "function" ? isStrict() : !!isStrict;
+    function presentation(getPrevious, resolved) {
+      const combine = typeof combineTitles === "function" ? combineTitles() : !!combineTitles;
+      return (uri, name) => {
+        const previous = getPrevious(uri)?.title;
+        if (name !== mapGet(resolved.tracks, uri)?.name) return name;
+        const joined = `${name} - ${previous}`;
+        return combine && hasText(name) && hasText(previous) && name !== previous && hasText(joined) ? joined : name;
+      };
+    }
     async function resolve(uris, signal) {
       checkAbort(signal);
       try {
@@ -1288,28 +1315,31 @@
             if (value?.wire !== 2) throw new Error("Missing Any value");
             if (kind === 186) creditsWire(value.data, {});
             const rewritten = kind === 186 ? value.data : rewriteWireValue(value.data, kind, uri, resolved);
-            if ([10, 97, 128, 178].includes(kind) && uri.startsWith("spotify:track:")) capture(observations, uri, previousWire(value.data, kind), previousWire(rewritten, kind), kind === 178 ? 3 : kind === 10 ? 2 : 1);
+            if ([10, 97, 128, 178].includes(kind) && uri.startsWith("spotify:track:")) capture(observations, uri, previousWire(value.data, kind), previousWire(rewritten, kind), kind === 178 ? 3 : kind === 10 ? 2 : 1, store.getPrevious(uri)?.title);
             return ld(3, concat(fields(entryField.data).map((field) => field.field === 3 && field.wire === 2 ? ld(3, concat(fields(any.data).map((item) => item.field === 2 && item.wire === 2 ? ld(2, rewritten) : item.raw))) : field.raw)));
           }, entryField.raw);
         })));
       })), bytes3);
       let finalOutput;
       await commit(resolved, observations, signal, async ({ getPrevious }) => {
+        const title = presentation(getPrevious, resolved);
         finalOutput = parseGuard(() => concat(fields(output).map((arrayField) => {
-          if (arrayField.field !== 2 || arrayField.wire !== 2 || Number(find(arrayField.data, 2)?.value) !== 186) return arrayField.raw;
+          if (arrayField.field !== 2 || arrayField.wire !== 2) return arrayField.raw;
+          const kind = Number(find(arrayField.data, 2)?.value);
+          if (![10, 97, 128, 178, 186].includes(kind)) return arrayField.raw;
           return ld(2, concat(fields(arrayField.data).map((entryField) => {
             if (entryField.field !== 3 || entryField.wire !== 2) return entryField.raw;
             return parseGuard(() => {
-              singularFields(entryField.data, [1, 2, 3]);
+              if (kind === 186) singularFields(entryField.data, [1, 2, 3]);
               const wrapper = find(entryField.data, 3);
               if (wrapper?.wire !== 2) throw new Error("Missing credits Any");
-              singularFields(wrapper.data, [2]);
+              if (kind === 186) singularFields(wrapper.data, [2]);
               const uri = stringAt(entryField.data, 2);
               const header = find(entryField.data, 1);
               if (Number(find(header?.data || new Uint8Array(), 1)?.value) !== 200) return entryField.raw;
               const any = find(entryField.data, 3);
               const value = find(any.data, 2);
-              const rewritten = creditsWire(value.data, getPrevious(uri));
+              const rewritten = kind === 186 ? creditsWire(value.data, getPrevious(uri)) : presentWireTitle(value.data, kind, uri, resolved, title);
               if (bytesEqual(rewritten, value.data)) return entryField.raw;
               return ld(3, concat(fields(entryField.data).map((field) => field.field === 3 && field.wire === 2 ? ld(3, concat(fields(any.data).map((item) => item.field === 2 && item.wire === 2 ? ld(2, rewritten) : item.raw))) : field.raw)));
             }, entryField.raw);
@@ -1354,6 +1384,7 @@
       const resolved = await resolve(uris, signal);
       const observations = [];
       const credits = [];
+      const titles = [];
       const visit = (object, inheritedURI, inheritedKind, keyHint, suppressEntity = false) => {
         if (!object || typeof object !== "object" || object instanceof Uint8Array) return;
         if (Array.isArray(object)) {
@@ -1368,23 +1399,43 @@
         if (uri && object.extensionResult?.value instanceof Uint8Array) {
           const raw = object.extensionResult.value;
           const rewritten = parseGuard(() => rewriteWireValue(raw, kind, uri, resolved), raw);
-          if ([10, 97, 128, 178].includes(kind)) parseGuard(() => capture(observations, uri, previousWire(raw, kind), previousWire(rewritten, kind), kind === 178 ? 3 : kind === 10 ? 2 : 1));
+          if ([10, 97, 128, 178].includes(kind)) parseGuard(() => capture(observations, uri, previousWire(raw, kind), previousWire(rewritten, kind), kind === 178 ? 3 : kind === 10 ? 2 : 1, store.getPrevious(uri)?.title));
           object.extensionResult.value = bytesEqual(raw, rewritten) ? raw : rewritten;
+          titles.push((title) => {
+            object.extensionResult.value = presentWireTitle(object.extensionResult.value, kind, uri, resolved, title);
+          });
         }
         if (uri && object.value instanceof Uint8Array && (object.typeUrl || object.type_url)) {
           const inferredKind = kind || (/\.Track$/.test(object.typeUrl || object.type_url) ? 10 : void 0);
           const raw = object.value;
           const rewritten = parseGuard(() => rewriteWireValue(raw, inferredKind, uri, resolved), raw);
-          if ([10, 97, 128, 178].includes(inferredKind)) parseGuard(() => capture(observations, uri, previousWire(raw, inferredKind), previousWire(rewritten, inferredKind), inferredKind === 178 ? 3 : inferredKind === 10 ? 2 : 1));
+          if ([10, 97, 128, 178].includes(inferredKind)) parseGuard(() => capture(observations, uri, previousWire(raw, inferredKind), previousWire(rewritten, inferredKind), inferredKind === 178 ? 3 : inferredKind === 10 ? 2 : 1, store.getPrevious(uri)?.title));
           object.value = bytesEqual(raw, rewritten) ? raw : rewritten;
+          titles.push((title) => {
+            object.value = presentWireTitle(object.value, inferredKind, uri, resolved, title);
+          });
           if (inferredKind === 186) credits.push({ holder: object, uri, raw: true });
         }
         const suppliedTrackCarrier = suppliedURI?.startsWith("spotify:track:") && uri === suppliedURI && keyHint === "trackUnion" && typeof displayName(object) === "string";
         const isEntity = !!contextualURI(object, keyHint) || !!entityURI(keyHint) || suppliedTrackCarrier || uri && (keyHint === "extensionResult" || kind && (object.name !== void 0 || object.contributors));
-        if (isEntity && !suppressEntity && uri && kind !== 186) typedRewrite(object, uri, resolved, kind === 178 ? 3 : kind === 10 || keyHint === "trackMetadata" ? 2 : [97, 128].includes(kind) ? 1 : priority, observations, kind);
+        if (isEntity && !suppressEntity && uri && kind !== 186) {
+          typedRewrite(object, uri, resolved, kind === 178 ? 3 : kind === 10 || keyHint === "trackMetadata" ? 2 : [97, 128].includes(kind) ? 1 : priority, observations, kind, store.getPrevious(uri)?.title);
+          if (uri.startsWith("spotify:track:") && mapGet(resolved.tracks, uri)) titles.push((title) => {
+            const old = displayName(object);
+            if (!hasText(old)) return;
+            const name = title(uri, old);
+            setName(object, name);
+            if (kind === 97 && object.title === old) object.title = name;
+          });
+        }
         if (uri && object.creditsTrait) credits.push({ value: object.creditsTrait, uri, graphQL: true });
         if (uri && kind === 186 && Array.isArray(object.contributors)) credits.push({ value: object, uri });
-        if (uri && mode === "player" && object.metadata && typeof object.metadata === "object") rewritePlayerMap(object.metadata, uri, resolved, observations);
+        if (uri && mode === "player" && object.metadata && typeof object.metadata === "object") {
+          rewritePlayerMap(object.metadata, uri, resolved, observations, store.getPrevious(uri)?.title);
+          if (mapGet(resolved.tracks, uri) && hasText(object.metadata.title)) titles.push((title) => {
+            object.metadata.title = title(uri, object.metadata.title);
+          });
+        }
         for (const [key2, item] of Object.entries(object)) {
           if (key2 === "creditsTrait" || key2 === "metadata" && mode === "player" || kind === 186 && key2 === "contributors") continue;
           const nextKind = /^\d+$/.test(key2) ? Number(key2) : kind;
@@ -1396,6 +1447,8 @@
       visit(output, suppliedURI, void 0);
       let finalOutput;
       await commit(resolved, observations, signal, async ({ getPrevious }) => {
+        const title = presentation(getPrevious, resolved);
+        for (const apply of titles) parseGuard(() => apply(title));
         for (const item of credits) {
           if (item.raw) {
             const raw = item.holder.value;
@@ -1415,7 +1468,7 @@
       rewriteMetadata
     };
   }
-  function rewritePlayerMap(metadata, uri, resolved, observations) {
+  function rewritePlayerMap(metadata, uri, resolved, observations, previousTitle) {
     const preferred = mapGet(resolved.tracks, uri);
     if (!preferred) return;
     const before = {}, after = {};
@@ -1435,7 +1488,7 @@
     }
     for (const key2 of ["title", "album_title"]) if (key2 in metadata) after[key2 === "title" ? "title" : "album"] = metadata[key2];
     if (artistKeys.length) after.artists = artistKeys.every((key2) => hasText(metadata[key2])) ? artistKeys.map((key2) => metadata[key2]) : [];
-    capture(observations, uri, before, after, 1);
+    capture(observations, uri, before, after, 1, previousTitle);
   }
 
   // src/network.mjs
@@ -2060,7 +2113,7 @@
     return true;
   }
   function createSettings(storage = globalThis.localStorage) {
-    let value = { strict: false, logging: false, installChoice: false };
+    let value = { strict: false, logging: false, installChoice: false, combineTitles: true };
     try {
       value = { ...value, ...JSON.parse(storage.getItem(SETTINGS_KEY) || "{}") };
     } catch {
@@ -2074,6 +2127,9 @@
       },
       get installChoice() {
         return value.installChoice === true;
+      },
+      get combineTitles() {
+        return value.combineTitles !== false;
       },
       snapshot() {
         return { ...value };
@@ -2159,6 +2215,21 @@
         summary.textContent = `${s.lookupEntities ?? 0} cached tracks/albums \xB7 ${s.artistNames} artist names \xB7 ${s.previousFields} previous fields \xB7 ${(s.bytes / 1024).toFixed(1)} KB stored data (estimate)`;
       };
       update();
+      const combined = checkbox(body, "Show original and previous song titles", settings.combineTitles, async (value) => {
+        combined.disabled = true;
+        try {
+          settings.update({ combineTitles: value });
+          await refreshMetadata();
+          notify("Title display saved. Reopen the page to update existing titles.");
+        } catch (error) {
+          combined.checked = settings.combineTitles;
+          log("title-display-refresh-error", error.message);
+          notify("Reopen pages or restart Spotify to apply the saved title display setting.");
+        } finally {
+          combined.disabled = false;
+        }
+      });
+      element("p", "Show changed songs as Original title - Previous title. Turn off to show only the original title.", body);
       checkbox(body, "Strict Mode", settings.strict, (value) => settings.update({ strict: value }));
       element("p", "Strict Mode blocks enhanced responses when a lookup or parsing fails. It can prevent pages from loading.", body);
       checkbox(body, "Diagnostic logging", settings.logging, (value) => settings.update({ logging: value }));
@@ -2231,8 +2302,8 @@
   }
 
   // src/index.mjs
-  var BUILD = false ? "source-development" : "392f7ff17dc7";
-  var VERSION = false ? void 0 : "1.0.1";
+  var BUILD = false ? "source-development" : "ebc80ec8760e";
+  var VERSION = false ? void 0 : "1.1.0";
   var CHANNEL = VERSION ? "release" : "local-development";
   var NAME = "JP Original Title (Spicetify)";
   var STARTUP = /* @__PURE__ */ Symbol.for("JPOriginalTitle.startup");
@@ -2300,7 +2371,7 @@
       const product = S.Platform.initialProductState?.product === "free" ? "free" : "premium";
       const resolver = new (components.Resolver ?? Resolver)({ request, store, scope: `${market}:${product}`, isStrict: () => settings.strict, log });
       cleanups.push(() => resolver.clear());
-      const transformer = (components.createTransformer ?? createTransformer)({ resolver, store, isStrict: () => settings.strict, log });
+      const transformer = (components.createTransformer ?? createTransformer)({ resolver, store, isStrict: () => settings.strict, combineTitles: () => settings.combineTitles, log });
       const hooks = (components.installHooks ?? installHooks)({ Spicetify: S, transformer, isStrict: () => settings.strict, log });
       cleanups.push(() => hooks.dispose());
       const management = (components.installManagement ?? installManagement)({ Spicetify: S, store, resolver, hooks, settings, log, diagnostics, buildID: BUILD, version: VERSION, channel: CHANNEL });

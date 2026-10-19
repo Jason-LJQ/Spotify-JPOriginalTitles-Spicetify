@@ -43,3 +43,17 @@ test('settings survive cache actions and update only the namespaced entry', () =
   assert.equal(values.get('other-extension'),'preserved');
   assert.deepEqual(observedURIs({observedUris:new Set(['a']),clients:new Map([['a',{}]])}),['a']);
 });
+
+test('combined song titles default on for existing settings and persist an explicit opt-out', () => {
+  const values = new Map();
+  const storage = { getItem: key => values.get(key), setItem: (key, value) => values.set(key, value) };
+  const settings = createSettings(storage);
+  assert.equal(settings.combineTitles, true);
+  settings.update({ strict: true, logging: true });
+  assert.equal(createSettings(storage).combineTitles, true);
+  settings.update({ combineTitles: false });
+  const reopened = createSettings(storage);
+  assert.equal(reopened.combineTitles, false);
+  assert.equal(reopened.strict, true);
+  assert.equal(reopened.logging, true);
+});
