@@ -54,6 +54,37 @@ test('album field35 selects only a unique exact recording in fully fetched album
   const result = await resolver.resolve([own.uri]);
   assert.equal(result.tracks.get(own.uri).name, '原曲'); assert.equal(result.tracks.get(own.uri).albumURI, b);
 });
+test('cold Latin-named album association preserves foreign versions after rejecting direct canonical', async () => {
+  for (const language of ['Chinese', 'English']) {
+    const a = uri('album', 1), b = uri('album', 2);
+    const own = record(1, { name: `Romanized - ${language} Ver.`, albumURI: a, canonicalURI: uri('track', 3), performanceLanguages: [language === 'Chinese' ? 'cmn' : 'en'] });
+    const correct = record(2, { name: `原曲 - ${language} Ver.`, albumURI: b, canonicalURI: uri('track', 3) });
+    const wrong = record(3, { name: '原曲', isrc: 'JAPANESE_RECORDING', duration: own.duration + 2 });
+    const { resolver, calls } = fixture([own, correct, wrong,
+      { uri: a, name: 'LATIN ALBUM', originalURI: b, tracks: [own.uri] },
+      { uri: b, name: 'LATIN ALBUM', tracks: [correct.uri] }]);
+    const result = await resolver.resolve([own.uri]);
+    assert.equal(result.complete, true);
+    assert.equal(result.tracks.get(own.uri).name, correct.name);
+    assert.ok(calls.some(call => call.entities.some(entity => entity.uri === correct.uri)));
+  }
+});
+test('associated album name may be empty while unique exact recording checks remain', () => {
+  const own = record(1, { albumURI: uri('album', 1) }), candidate = record(2, { name: '原曲' });
+  const linked = { name: '', tracks: [candidate.uri] };
+  const all = new Map([[own.albumURI, { name: 'Latin', originalURI: uri('album', 2), tracks: [own.uri] }],
+    [uri('album', 2), linked], [candidate.uri, candidate]]);
+  assert.equal(selection.albumOriginal(own, all), candidate);
+  for (const extra of [{ isrc: 'OTHER' }, { duration: own.duration + 1 }, { number: 2 }, { disc: 2 }, { name: 'Latin' }]) {
+    all.set(candidate.uri, { ...candidate, ...extra });
+    assert.equal(selection.albumOriginal(own, all), undefined);
+  }
+  all.set(candidate.uri, candidate);
+  linked.tracks.push(uri('track', 3));
+  assert.equal(selection.albumOriginal(own, all), undefined);
+  all.set(uri('track', 3), { ...candidate, number: 2 });
+  assert.equal(selection.albumOriginal(own, all), undefined);
+});
 test('duplicate ISRC rejects album even if only one has matching position', () => {
   const own = record(1, { albumURI: uri('album', 1) }), a = record(2, { name: '原曲' }), b = record(3, { name: '別曲', number: 2 });
   const all = new Map([[a.uri, a], [b.uri, b], [own.albumURI, { name: '原盤', tracks: [a.uri, b.uri] }]]);

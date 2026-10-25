@@ -27,7 +27,7 @@ for (let i = 0; i < sourceNames.length; i++) {
 await rename(`${root}dist/.jp-original-titles.js.building`, `${root}dist/jp-original-titles.js`);
 const output = await readFile(`${root}dist/jp-original-titles.js`);
 await writeFile(`${root}dist/build.json`, JSON.stringify({ name: 'JP Original Title (Spicetify)',
-  channel: 'release', version, buildID, iosBaseline: 'v7.0.2',
+  channel: 'release', version, buildID, iosBaseline: 'v7.0.4',
   sha256: createHash('sha256').update(output).digest('hex'), bytes: output.length,
   sources: Object.fromEntries(sourceNames.map((name, i) => [name, createHash('sha256').update(sources[i]).digest('hex')])) }, null, 2) + '\n');
 console.log(`Built extension v${version}, ${buildID} (${output.length} bytes).`);

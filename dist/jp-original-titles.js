@@ -1,4 +1,4 @@
-// JP Original Title (Spicetify) v1.1.0
+// JP Original Title (Spicetify) v1.1.2
 (() => {
   // src/wire.mjs
   var encoder = new TextEncoder();
@@ -250,12 +250,12 @@
     const own = all.get(uri);
     if (!own?.tracks) return void 0;
     const linked = all.get(own.originalURI ?? own.canonicalURI);
-    return !hasCJK(own.name) && linked?.tracks && hasCJK(linked.name) ? linked : own;
+    return !hasCJK(own.name) && linked?.tracks ? linked : own;
   }
   function albumOriginal(own, all) {
     if (!own || hasCJK(own.name) || !own.isrc || !own.duration || !own.number || !own.disc) return void 0;
     const album = preferredAlbum(own.albumURI, all);
-    if (!album || !hasCJK(album.name) || !album.tracks.length || album.tracks.some((uri) => !all.has(uri))) return void 0;
+    if (!album || !album.tracks.length || album.tracks.some((uri) => !all.has(uri))) return void 0;
     const matches = album.tracks.map((uri) => all.get(uri)).filter((t) => t.isrc === own.isrc);
     const match = matches.length === 1 ? matches[0] : void 0;
     return match && hasCJK(match.name) && match.duration === own.duration && match.number === own.number && match.disc === own.disc ? match : void 0;
@@ -589,7 +589,7 @@
       await this.query(linked, context);
       const tracks = [...albums].flatMap((uri) => {
         const a = preferredAlbum(uri, this.cache);
-        return a && hasCJK(a.name) ? a.tracks : [];
+        return a ? a.tracks : [];
       });
       await this.query(tracks, context);
     }
@@ -2302,8 +2302,8 @@
   }
 
   // src/index.mjs
-  var BUILD = false ? "source-development" : "ebc80ec8760e";
-  var VERSION = false ? void 0 : "1.1.0";
+  var BUILD = false ? "source-development" : "a2bf10c8ea8d";
+  var VERSION = false ? void 0 : "1.1.2";
   var CHANNEL = VERSION ? "release" : "local-development";
   var NAME = "JP Original Title (Spicetify)";
   var STARTUP = /* @__PURE__ */ Symbol.for("JPOriginalTitle.startup");

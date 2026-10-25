@@ -38,12 +38,12 @@ function preferredAlbum(uri, all) {
   const own = all.get(uri);
   if (!own?.tracks) return undefined;
   const linked = all.get(own.originalURI ?? own.canonicalURI);
-  return !hasCJK(own.name) && linked?.tracks && hasCJK(linked.name) ? linked : own;
+  return !hasCJK(own.name) && linked?.tracks ? linked : own;
 }
 function albumOriginal(own, all) {
   if (!own || hasCJK(own.name) || !own.isrc || !own.duration || !own.number || !own.disc) return undefined;
   const album = preferredAlbum(own.albumURI, all);
-  if (!album || !hasCJK(album.name) || !album.tracks.length || album.tracks.some(uri => !all.has(uri))) return undefined;
+  if (!album || !album.tracks.length || album.tracks.some(uri => !all.has(uri))) return undefined;
   const matches = album.tracks.map(uri => all.get(uri)).filter(t => t.isrc === own.isrc);
   const match = matches.length === 1 ? matches[0] : undefined;
   return match && hasCJK(match.name) && match.duration === own.duration && match.number === own.number && match.disc === own.disc ? match : undefined;
@@ -306,7 +306,7 @@ export class Resolver {
     await this.query(albums, context);
     const linked = [...albums].flatMap(uri => { const a = this.cache.get(uri); return a && !hasCJK(a.name) && isAlbum(a.originalURI) && a.originalURI !== uri ? [a.originalURI] : []; });
     await this.query(linked, context);
-    const tracks = [...albums].flatMap(uri => { const a = preferredAlbum(uri, this.cache); return a && hasCJK(a.name) ? a.tracks : []; });
+    const tracks = [...albums].flatMap(uri => { const a = preferredAlbum(uri, this.cache); return a ? a.tracks : []; });
     await this.query(tracks, context);
   }
   async indirect(uris, context) {
