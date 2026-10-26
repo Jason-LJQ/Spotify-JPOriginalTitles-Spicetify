@@ -1,4 +1,4 @@
-// JP Original Title (Spicetify) v1.1.2
+// JP Original Title (Spicetify) v1.1.3
 (() => {
   // src/wire.mjs
   var encoder = new TextEncoder();
@@ -382,7 +382,8 @@
       const tracks = /* @__PURE__ */ new Map();
       for (const map of [decoded.tracks, decoded.albums]) for (const [uri, raw] of map ?? []) {
         const previous = isTrack(uri) ? this.store?.getPreviousRecord?.(uri, "title") : void 0;
-        const value = previous?.now && previous.value && raw.name === `${previous.now} - ${previous.value}` ? { ...raw, name: previous.now } : raw;
+        const combined = previous?.now && previous.value && [`${previous.now}\uFF5C${previous.value}`, `${previous.now} - ${previous.value}`].includes(raw.name);
+        const value = combined ? { ...raw, name: previous.now } : raw;
         this.clients.set(uri, value);
         if (isTrack(uri)) tracks.set(uri, value);
       }
@@ -1067,7 +1068,7 @@
   }
   function capture(observations, uri, before, after, priority, previousTitle) {
     if (!uri?.startsWith("spotify:track:")) return;
-    if (hasText(previousTitle) && before.title === `${after.title} - ${previousTitle}`) before = { ...before, title: after.title };
+    if (hasText(previousTitle) && [`${after.title}\uFF5C${previousTitle}`, `${after.title} - ${previousTitle}`].includes(before.title)) before = { ...before, title: after.title };
     for (const field of ["title", "artists", "album"]) {
       if (!(field in before) && !(field in after)) continue;
       const old = before[field] ?? (field === "artists" ? [] : "");
@@ -1232,7 +1233,7 @@
       return (uri, name) => {
         const previous = getPrevious(uri)?.title;
         if (name !== mapGet(resolved.tracks, uri)?.name) return name;
-        const joined = `${name} - ${previous}`;
+        const joined = `${name}\uFF5C${previous}`;
         return combine && hasText(name) && hasText(previous) && name !== previous && hasText(joined) ? joined : name;
       };
     }
@@ -2229,7 +2230,7 @@
           combined.disabled = false;
         }
       });
-      element("p", "Show changed songs as Original title - Previous title. Turn off to show only the original title.", body);
+      element("p", "Show changed songs as Original title\uFF5CPrevious title. Turn off to show only the original title.", body);
       checkbox(body, "Strict Mode", settings.strict, (value) => settings.update({ strict: value }));
       element("p", "Strict Mode blocks enhanced responses when a lookup or parsing fails. It can prevent pages from loading.", body);
       checkbox(body, "Diagnostic logging", settings.logging, (value) => settings.update({ logging: value }));
@@ -2302,8 +2303,8 @@
   }
 
   // src/index.mjs
-  var BUILD = false ? "source-development" : "a2bf10c8ea8d";
-  var VERSION = false ? void 0 : "1.1.2";
+  var BUILD = false ? "source-development" : "c20a86e2da20";
+  var VERSION = false ? void 0 : "1.1.3";
   var CHANNEL = VERSION ? "release" : "local-development";
   var NAME = "JP Original Title (Spicetify)";
   var STARTUP = /* @__PURE__ */ Symbol.for("JPOriginalTitle.startup");

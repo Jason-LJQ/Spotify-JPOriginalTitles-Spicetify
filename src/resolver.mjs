@@ -138,8 +138,9 @@ export class Resolver {
     const tracks = new Map();
     for (const map of [decoded.tracks, decoded.albums]) for (const [uri, raw] of map ?? []) {
       const previous = isTrack(uri) ? this.store?.getPreviousRecord?.(uri, 'title') : undefined;
-      // Strip only an exact presentation proven by our persisted raw/current pair.
-      const value = previous?.now && previous.value && raw.name === `${previous.now} - ${previous.value}` ? { ...raw, name: previous.now } : raw;
+      // Strip only an exact presentation proven by our persisted raw/current pair, including the v1.1.2 " - " form.
+      const combined = previous?.now && previous.value && [`${previous.now}｜${previous.value}`, `${previous.now} - ${previous.value}`].includes(raw.name);
+      const value = combined ? { ...raw, name: previous.now } : raw;
       this.clients.set(uri, value);
       if (isTrack(uri)) tracks.set(uri, value);
     }

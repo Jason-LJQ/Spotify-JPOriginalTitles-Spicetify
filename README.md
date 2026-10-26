@@ -15,7 +15,7 @@ Based on [Spotify JPOriginalTitles for iOS](https://github.com/Jason-LJQ/Spotify
 - Adds **Original Metadata** to Credits. **Title**, **Artist** and **Album** show only nonempty values actually replaced by the extension.
 - Saves track and album lookups, verified artist information and previous fields in a dedicated IndexedDB database. Cached lookups are reused after restarting Spotify.
 - Shares duplicate lookups across pages and skips unnecessary album lookups after a verified direct match.
-- Shows changed song names as **Original title - Previous title** by default, with an option to show only the original title. Album and artist names keep their original-name display.
+- Shows changed song names as **Original title｜Previous title** (U+FF5C, no spaces) by default, with an option to show only the original title. Album and artist names keep their original-name display.
 - Includes optional Strict Mode, diagnostics, plugin-cache reset and viewed-metadata refresh.
 
 The extension does not translate titles, rename playlists, change Spotify's language, replace audio or unlock restricted releases. It was developed on macOS; Windows and Linux compatibility has not been established.

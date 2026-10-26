@@ -135,8 +135,8 @@ function observationDeltas(observations) {
 }
 function capture(observations, uri, before, after, priority, previousTitle) {
   if (!uri?.startsWith('spotify:track:')) return;
-  // A delivered combined title is presentation, never a new original value.
-  if (hasText(previousTitle) && before.title === `${after.title} - ${previousTitle}`) before = { ...before, title: after.title };
+  // A delivered combined title is presentation, never a new original value. v1.1.2 and earlier joined with " - ".
+  if (hasText(previousTitle) && [`${after.title}｜${previousTitle}`, `${after.title} - ${previousTitle}`].includes(before.title)) before = { ...before, title: after.title };
   for (const field of ['title', 'artists', 'album']) {
     if (!(field in before) && !(field in after)) continue;
     const old = before[field] ?? (field === 'artists' ? [] : '');
@@ -303,7 +303,7 @@ export function createTransformer({ resolver, store, isStrict = () => false, com
     return (uri, name) => {
       const previous = getPrevious(uri)?.title;
       if (name !== mapGet(resolved.tracks, uri)?.name) return name;
-      const joined = `${name} - ${previous}`;
+      const joined = `${name}｜${previous}`;
       return combine && hasText(name) && hasText(previous) && name !== previous && hasText(joined) ? joined : name;
     };
   }

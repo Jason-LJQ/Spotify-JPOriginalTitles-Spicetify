@@ -81,7 +81,7 @@ export function installManagement({ Spicetify: S, store, resolver, hooks, settin
         notify('Reopen pages or restart Spotify to apply the saved title display setting.');
       } finally { combined.disabled = false; }
     });
-    element('p', 'Show changed songs as Original title - Previous title. Turn off to show only the original title.', body);
+    element('p', 'Show changed songs as Original title｜Previous title. Turn off to show only the original title.', body);
     checkbox(body, 'Strict Mode', settings.strict, value => settings.update({ strict: value }));
     element('p', 'Strict Mode blocks enhanced responses when a lookup or parsing fails. It can prevent pages from loading.', body);
     checkbox(body, 'Diagnostic logging', settings.logging, value => settings.update({ logging: value }));
