@@ -31,7 +31,7 @@ async function fixture(raw, strict = false) {
     async load() { return { artist_names: [], previous_fields: [] }; },
     async write() { writes++; },
   } }).open();
-  const preferred = { uri, name: 'After', artists: [] };
+  const preferred = { uri, name: '後の名', artists: [] };
   const resolver = { async resolve() {
     return { tracks: new Map([[uri, preferred]]), sourceTracks: new Map([[uri, { uri, name: 'Before', artists: [] }]]),
       albums: new Map(), artistNames: new Map(), failures: [] };
@@ -76,7 +76,7 @@ test('validated native delivery commits old values and retains unknown bytes at 
   const f = await fixture(raw);
   try {
     const output = await f.request();
-    assert.equal(playerCodec.decode(output).track.contextTrack.metadata.title, 'After');
+    assert.equal(playerCodec.decode(output).track.contextTrack.metadata.title, '後の名');
     assert.equal(f.writes(), 1);
     assert.equal(f.store.getPrevious(uri).title, 'Before');
     const provided = field(output, 7).data;

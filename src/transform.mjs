@@ -1,10 +1,19 @@
 import { fields, ld, concat, replaceString, decodeMetadata, gidToURI, parseTrack, parseAlbum } from './wire.mjs';
+import { hasCJK } from './resolver.mjs';
 
 const textDecoder = new TextDecoder('utf-8', { fatal: true });
 const GROUP = 'Original Metadata';
 const ROLES = { title: 'Title', artists: 'Artist', album: 'Album' };
 const entityPattern = /^spotify:(track|album|artist):[A-Za-z0-9]+$/;
 const hasText = value => typeof value === 'string' && value.length <= 4096 && value.trim().length > 0;
+// Delivered names change only when a name without CJK text gains CJK text.
+const upgrades = (old, name) => hasText(name) && !hasCJK(old) && hasCJK(name);
+// Spotify can hand back a title this extension combined earlier; v1.1.2 and earlier joined with " - ".
+const presented = (old, name, previous) => hasText(previous) && [`${name}｜${previous}`, `${name} - ${previous}`].includes(old);
+const retitles = (old, name, previous) => upgrades(old, name) || (hasText(name) && presented(old, name, previous));
+// original_title and version_title form one display title and change together.
+const structured = (original, version, preferred) => hasText(preferred.originalTitle)
+  && upgrades(`${original ?? ''} ${version ?? ''}`, `${preferred.originalTitle} ${preferred.versionTitle || ''}`);
 const entityURI = value => typeof value === 'string' && entityPattern.test(value) ? value : undefined;
 const directURI = object => entityURI(object?.uri) || entityURI(object?.entityUri) || entityURI(object?.entityURI) || entityURI(object?.trackUri);
 const contextualURI = (object, keyHint) => directURI(object) || (['trackMetadata', 'albumMetadata', 'artistMetadata', 'album', 'artist'].includes(keyHint) ? entityURI(object?.link) : undefined);
@@ -79,6 +88,9 @@ function setName(object, name) {
   if (typeof object.name === 'string') object.name = name;
   else if (typeof object.title === 'string') object.title = name;
   else if (typeof object.profile?.name === 'string') object.profile.name = name;
+}
+function rename(object, name) {
+  if (upgrades(displayName(object), name)) setName(object, name);
 }
 function previousNames(object) {
   const result = {};
@@ -196,13 +208,15 @@ function creditsWire(bytes, previous) {
   }
   return concat(parts);
 }
-function rewriteWireValue(bytes, kind, uri, resolved) {
+function rewriteWireValue(bytes, kind, uri, resolved, previousTitle) {
   const preferred = mapGet(resolved.tracks, uri);
   const name = mapGet(resolved.artistNames, uri);
   const album = mapGet(resolved.albums, uri);
   if (kind === 128) {
     const selectedName = uri.startsWith('spotify:track:') ? preferred?.name : uri.startsWith('spotify:album:') ? album?.name : name;
-    return hasText(selectedName) ? replaceString(bytes, 1, selectedName) : bytes;
+    const old = stringAt(bytes, 1);
+    const change = uri.startsWith('spotify:track:') ? retitles(old, selectedName, previousTitle) : upgrades(old, selectedName);
+    return change ? replaceString(bytes, 1, selectedName) : bytes;
   }
   if (kind === 97 && uri.startsWith('spotify:track:') && preferred) {
     const originalName = stringAt(bytes, 2);
@@ -211,39 +225,55 @@ function rewriteWireValue(bytes, kind, uri, resolved) {
     const originalArtists = children.map(field => stringAt(field.data, 1));
     const complete = source?.artists?.length > 0 && children.length === source.artists.length && originalArtists.every((old, index) => hasText(old) && old === source.artists[index].name);
     const replacements = complete ? source.artists.map(artist => mapGet(resolved.artistNames, artist.uri) || preferred.artists?.find(item => item.uri === artist.uri)?.name || artist.name) : [];
+    const finals = replacements.map((name, i) => upgrades(originalArtists[i], name) ? name : originalArtists[i]);
+    const title = retitles(originalName, preferred.name, previousTitle);
     let index = 0;
     return concat(fields(bytes).map(field => {
       if (field.wire !== 2) return field.raw;
-      if (field.field === 2 && hasText(preferred.name)) return ld(2, preferred.name);
-      if (field.field === 6 && hasText(preferred.name) && decode(field) === originalName) return ld(6, preferred.name);
-      if (complete && field.field === 8) return ld(8, replaceString(field.data, 1, replacements[index++]));
-      if (complete && field.field === 3 && decode(field) === originalArtists.join(', ')) return ld(3, replacements.join(', '));
+      if (field.field === 2 && title) return ld(2, preferred.name);
+      if (field.field === 6 && title && decode(field) === originalName) return ld(6, preferred.name);
+      if (complete && field.field === 8) { const i = index++; return finals[i] === originalArtists[i] ? field.raw : ld(8, replaceString(field.data, 1, finals[i])); }
+      if (complete && field.field === 3 && decode(field) === originalArtists.join(', ') && finals.join(', ') !== decode(field)) return ld(3, finals.join(', '));
       return field.raw;
     }));
   }
-  if (uri.startsWith('spotify:artist:') && [8, 97, 178].includes(kind) && hasText(name)) {
+  if (uri.startsWith('spotify:artist:') && [8, 97, 178].includes(kind) && upgrades(stringAt(bytes, 2), name)) {
     const old = stringAt(bytes, 2);
     let output = replaceString(bytes, 2, name);
     if (kind === 97 && stringAt(bytes, 6) === old) output = replaceString(output, 6, name);
     return output;
   }
-  if (uri.startsWith('spotify:album:') && [9, 178].includes(kind) && hasText(album?.name)) {
+  if (uri.startsWith('spotify:album:') && [9, 178].includes(kind) && upgrades(stringAt(bytes, 2), album?.name)) {
     let output = replaceString(bytes, 2, album.name);
     if (kind === 9 && hasText(album.originalTitle)) output = replaceString(output, 18, album.originalTitle);
     return output;
   }
   if (!preferred || ![10, 178].includes(kind)) return bytes;
   if (kind === 178) {
+    // IdentityTrait is what Spotify displays; keep each name unless it gains CJK text.
+    const old = previousWire(bytes, 178);
+    const names = (preferred.artists ?? []).map(artist => mapGet(resolved.artistNames, artist.uri) || artist.name);
+    const title = retitles(old.title, preferred.name, previousTitle);
+    const album = hasText(preferred.albumURI) && upgrades(old.album, preferred.albumName);
+    const artists = names.length > 0 && upgrades((old.artists ?? []).join(', '), names.join(', '));
+    // A list that already has CJK text still renames each same-URI artist that gains it.
+    const items = fields(bytes);
+    const renamed = artists ? undefined : new Map(items.filter(field => field.field === 5 && field.wire === 2).flatMap(field => {
+      const artistURI = stringAt(field.data, 2);
+      const name = mapGet(resolved.artistNames, artistURI) || preferred.artists?.find(artist => artist.uri === artistURI)?.name;
+      return upgrades(stringAt(field.data, 1), name) ? [[field, ld(5, replaceString(field.data, 1, name))]] : [];
+    }));
+    if (!title && !album && !artists && !renamed.size) return bytes;
     const parts = [];
-    for (const field of fields(bytes)) {
-      if (field.field === 2 && hasText(preferred.name)) continue;
-      if (field.field === 4 && hasText(preferred.albumName) && hasText(preferred.albumURI)) {
+    for (const field of items) {
+      if (field.field === 2 && title) parts.push(ld(2, preferred.name));
+      else if (field.field === 4 && album) {
         parts.push(ld(4, replaceString(replaceString(field.data, 1, preferred.albumName), 2, preferred.albumURI)));
-      } else if (field.field === 5 && preferred.artists?.length) continue;
-      else parts.push(field.raw);
+      } else if (field.field === 5 && artists) continue;
+      else parts.push(renamed?.get(field) ?? field.raw);
     }
-    if (hasText(preferred.name)) parts.push(ld(2, preferred.name));
-    if (preferred.artists?.length) for (const artist of preferred.artists) {
+    if (title && old.title === undefined) parts.push(ld(2, preferred.name));
+    if (artists) for (const artist of preferred.artists) {
       const own = fields(bytes).find(field => field.field === 5 && field.wire === 2 && stringAt(field.data, 2) === artist.uri);
       const name = mapGet(resolved.artistNames, artist.uri) || artist.name;
       const contributor = own ? replaceString(own.data, 1, name) : concat(ld(1, name), ld(2, artist.uri));
@@ -251,17 +281,18 @@ function rewriteWireValue(bytes, kind, uri, resolved) {
     }
     return concat(parts);
   }
+  const pair = structured(stringAt(bytes, 27), stringAt(bytes, 28), preferred);
   return concat(fields(bytes).map(field => {
     if (field.wire !== 2) return field.raw;
-    if (field.field === 2 && hasText(preferred.name)) return ld(2, preferred.name);
-    if ([27, 28].includes(field.field) && hasText(preferred.originalTitle)) return ld(field.field, field.field === 27 ? preferred.originalTitle : preferred.versionTitle || '');
-    if (field.field === 3 && hasText(preferred.albumName)) return ld(3, replaceString(field.data, 2, preferred.albumName));
+    if (field.field === 2 && retitles(decode(field), preferred.name, previousTitle)) return ld(2, preferred.name);
+    if ([27, 28].includes(field.field) && pair) return ld(field.field, field.field === 27 ? preferred.originalTitle : preferred.versionTitle || '');
+    if (field.field === 3 && upgrades(stringAt(field.data, 2), preferred.albumName)) return ld(3, replaceString(field.data, 2, preferred.albumName));
     if ([4, 32].includes(field.field)) {
       // TRACK_V4 artist IDs stay intact; only URI-matched names are replaced.
       const artistURI = gidToURI(find(field.data, 1)?.data, 'artist');
       const selected = preferred.artists?.find(artist => artist.uri === artistURI);
       const selectedName = mapGet(resolved.artistNames, artistURI) || selected?.name;
-      if (hasText(selectedName)) return ld(field.field, replaceString(field.data, 2, selectedName));
+      if (upgrades(stringAt(field.data, 2), selectedName)) return ld(field.field, replaceString(field.data, 2, selectedName));
     }
     return field.raw;
   }));
@@ -270,12 +301,14 @@ function typedRewrite(object, uri, resolved, priority, observations, kind, previ
   const before = previousNames(object);
   const preferred = mapGet(resolved.tracks, uri);
   if (uri.startsWith('spotify:track:') && preferred) {
-    setName(object, preferred.name);
-    if (kind === 97 && hasText(preferred.name) && object.title === before.title) object.title = preferred.name;
-    for (const key of ['originalTitle', 'original_title']) if (key in object && hasText(preferred.originalTitle)) object[key] = preferred.originalTitle;
-    for (const key of ['versionTitle', 'version_title']) if (key in object && hasText(preferred.originalTitle)) object[key] = preferred.versionTitle || '';
+    if (retitles(displayName(object), preferred.name, previousTitle)) setName(object, preferred.name);
+    if (kind === 97 && retitles(before.title, preferred.name, previousTitle) && object.title === before.title) object.title = preferred.name;
+    if (structured(object.originalTitle ?? object.original_title, object.versionTitle ?? object.version_title, preferred)) {
+      for (const key of ['originalTitle', 'original_title']) if (key in object) object[key] = preferred.originalTitle;
+      for (const key of ['versionTitle', 'version_title']) if (key in object) object[key] = preferred.versionTitle || '';
+    }
     const album = object.albumOfTrack ?? object.album ?? object.contentHierarchyParent;
-    if (album && hasText(preferred.albumName)) {
+    if (album && upgrades(displayName(album), preferred.albumName)) {
       setName(album, preferred.albumName);
       // Typed IdentityTrait and GraphQL parents follow the adopted album URI.
       if (priority !== 2 && hasText(preferred.albumURI) && 'uri' in album) album.uri = preferred.albumURI;
@@ -284,14 +317,14 @@ function typedRewrite(object, uri, resolved, priority, observations, kind, previ
     for (const artist of artists) {
       const artistURI = contextualURI(artist, 'artist');
       const preferredArtist = preferred.artists?.find(item => item.uri === artistURI);
-      setName(artist, mapGet(resolved.artistNames, artistURI) || preferredArtist?.name);
+      rename(artist, mapGet(resolved.artistNames, artistURI) || preferredArtist?.name);
     }
-  } else if (uri.startsWith('spotify:album:')) setName(object, mapGet(resolved.albums, uri)?.name);
+  } else if (uri.startsWith('spotify:album:')) rename(object, mapGet(resolved.albums, uri)?.name);
   else if (uri.startsWith('spotify:artist:')) {
     const old = displayName(object);
     const name = mapGet(resolved.artistNames, uri);
-    setName(object, name);
-    if (kind === 97 && hasText(name) && object.title === old) object.title = name;
+    rename(object, name);
+    if (kind === 97 && upgrades(old, name) && object.title === old) object.title = name;
   }
   capture(observations, uri, before, previousNames(object), priority, previousTitle);
 }
@@ -380,7 +413,7 @@ export function createTransformer({ resolver, store, isStrict = () => false, com
           const value = find(any.data, 2);
           if (value?.wire !== 2) throw new Error('Missing Any value');
           if (kind === 186) creditsWire(value.data, {});
-          const rewritten = kind === 186 ? value.data : rewriteWireValue(value.data, kind, uri, resolved);
+          const rewritten = kind === 186 ? value.data : rewriteWireValue(value.data, kind, uri, resolved, store.getPrevious(uri)?.title);
           if ([10, 97, 128, 178].includes(kind) && uri.startsWith('spotify:track:')) capture(observations, uri, previousWire(value.data, kind), previousWire(rewritten, kind), kind === 178 ? 3 : kind === 10 ? 2 : 1, store.getPrevious(uri)?.title);
           return ld(3, concat(fields(entryField.data).map(field => field.field === 3 && field.wire === 2 ? ld(3, concat(fields(any.data).map(item => item.field === 2 && item.wire === 2 ? ld(2, rewritten) : item.raw))) : field.raw)));
         }, entryField.raw);
@@ -460,7 +493,7 @@ export function createTransformer({ resolver, store, isStrict = () => false, com
       if (uri && kind === 186 && object.extensionResult?.value instanceof Uint8Array) credits.push({ holder: object.extensionResult, uri, raw: true });
       if (uri && object.extensionResult?.value instanceof Uint8Array) {
         const raw = object.extensionResult.value;
-        const rewritten = parseGuard(() => rewriteWireValue(raw, kind, uri, resolved), raw);
+        const rewritten = parseGuard(() => rewriteWireValue(raw, kind, uri, resolved, store.getPrevious(uri)?.title), raw);
         if ([10, 97, 128, 178].includes(kind)) parseGuard(() => capture(observations, uri, previousWire(raw, kind), previousWire(rewritten, kind), kind === 178 ? 3 : kind === 10 ? 2 : 1, store.getPrevious(uri)?.title));
         object.extensionResult.value = bytesEqual(raw, rewritten) ? raw : rewritten;
         titles.push(title => { object.extensionResult.value = presentWireTitle(object.extensionResult.value, kind, uri, resolved, title); });
@@ -468,7 +501,7 @@ export function createTransformer({ resolver, store, isStrict = () => false, com
       if (uri && object.value instanceof Uint8Array && (object.typeUrl || object.type_url)) {
         const inferredKind = kind || (/\.Track$/.test(object.typeUrl || object.type_url) ? 10 : undefined);
         const raw = object.value;
-        const rewritten = parseGuard(() => rewriteWireValue(raw, inferredKind, uri, resolved), raw);
+        const rewritten = parseGuard(() => rewriteWireValue(raw, inferredKind, uri, resolved, store.getPrevious(uri)?.title), raw);
         if ([10, 97, 128, 178].includes(inferredKind)) parseGuard(() => capture(observations, uri, previousWire(raw, inferredKind), previousWire(rewritten, inferredKind), inferredKind === 178 ? 3 : inferredKind === 10 ? 2 : 1, store.getPrevious(uri)?.title));
         object.value = bytesEqual(raw, rewritten) ? raw : rewritten;
         titles.push(title => { object.value = presentWireTitle(object.value, inferredKind, uri, resolved, title); });
@@ -533,16 +566,18 @@ function rewritePlayerMap(metadata, uri, resolved, observations, previousTitle) 
   for (const key of ['title', 'album_title']) if (key in metadata) before[key === 'title' ? 'title' : 'album'] = metadata[key];
   const artistKeys = Object.keys(metadata).filter(key => /^artist_name(?::\d+)?$/.test(key)).sort((a, b) => Number(a.split(':')[1] || 0) - Number(b.split(':')[1] || 0));
   if (artistKeys.length) before.artists = artistKeys.every(key => hasText(metadata[key])) ? artistKeys.map(key => metadata[key]) : [];
-  if (hasText(preferred.name) && 'title' in metadata) metadata.title = preferred.name;
-  if (hasText(preferred.albumName) && 'album_title' in metadata) metadata.album_title = preferred.albumName;
-  if (hasText(preferred.originalTitle) && 'original_title' in metadata) metadata.original_title = preferred.originalTitle;
-  if (hasText(preferred.originalTitle) && 'version_title' in metadata) metadata.version_title = preferred.versionTitle || '';
+  if ('title' in metadata && retitles(metadata.title, preferred.name, previousTitle)) metadata.title = preferred.name;
+  if ('album_title' in metadata && upgrades(metadata.album_title, preferred.albumName)) metadata.album_title = preferred.albumName;
+  if (structured(metadata.original_title, metadata.version_title, preferred)) {
+    if ('original_title' in metadata) metadata.original_title = preferred.originalTitle;
+    if ('version_title' in metadata) metadata.version_title = preferred.versionTitle || '';
+  }
   for (const key of artistKeys) {
     const suffix = key.slice('artist_name'.length);
     const artistURI = metadata[`artist_uri${suffix}`];
     const artist = preferred.artists?.find(item => item.uri === artistURI);
     const name = mapGet(resolved.artistNames, artistURI) || artist?.name;
-    if (hasText(name)) metadata[key] = name;
+    if (upgrades(metadata[key], name)) metadata[key] = name;
   }
   for (const key of ['title', 'album_title']) if (key in metadata) after[key === 'title' ? 'title' : 'album'] = metadata[key];
   if (artistKeys.length) after.artists = artistKeys.every(key => hasText(metadata[key])) ? artistKeys.map(key => metadata[key]) : [];

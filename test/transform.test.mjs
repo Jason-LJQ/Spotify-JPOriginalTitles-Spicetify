@@ -392,12 +392,12 @@ test('unrecognized arbitrary link properties are not entity carriers', async () 
 });
 test('track-adopted parent album name is not overwritten by standalone album-page mapping', async () => {
   const store = { commit: async ({ prepare } = {}) => prepare?.({ getPrevious: () => ({}) }), getPrevious: () => ({}) };
-  const resolver = { resolve: async () => ({ tracks: new Map([[trackURI, preferred]]), albums: new Map([[albumURI, { name: 'Standalone Latin Album' }]]), artistNames: new Map([[artistURI, '歌手']]) }) };
+  const resolver = { resolve: async () => ({ tracks: new Map([[trackURI, preferred]]), albums: new Map([[albumURI, { name: '単独アルバム' }]]), artistNames: new Map([[artistURI, '歌手']]) }) };
   const transformer = createTransformer({ resolver, store });
   const input = { data: { item: [{ uri: trackURI, trackMetadata: { link: trackURI, name: 'Roman', album: { link: albumURI, name: 'Album' }, artist: [{ link: artistURI, name: 'Artist' }] } }], albumMetadata: { link: albumURI, name: 'Album' } } };
   const output = await transformer.rewriteNative(input);
   assert.equal(output.data.item[0].trackMetadata.album.name, '原盤');
-  assert.equal(output.data.albumMetadata.name, 'Standalone Latin Album');
+  assert.equal(output.data.albumMetadata.name, '単独アルバム');
 });
 test('complete JSON Credits candidate is validated before persistence and remains unchanged afterward', async () => {
   const { transformer, commits, saved } = setup();

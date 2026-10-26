@@ -1,6 +1,6 @@
 {
   "name": "jp-original-title-spicetify",
-  "version": "1.1.3",
+  "version": "1.1.4",
   "private": true,
   "description": "Restore original names in Spotify Desktop with Spicetify",
   "type": "module",
