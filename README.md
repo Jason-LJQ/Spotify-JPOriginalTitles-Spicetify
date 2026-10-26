@@ -10,6 +10,7 @@ Based on [Spotify JPOriginalTitles for iOS](https://github.com/Jason-LJQ/Spotify
 
 - Enhances structured HTTP responses and native metadata delivery before Spotify renders them.
 - Uses original-release metadata, canonical links and verified associated-album or single-hop sibling matches. Unresolved names retain Spotify's values.
+- Replaces a delivered name only when a name without CJK text gains CJK text. Chinese, Latin-only and case-only differences from another release keep Spotify's values. Each artist is checked separately.
 - Looks up artist names with Chinese-first and conservative Japanese fallback rules, retaining playable artist links.
 - Rejects canonical candidates whose recording identifiers and exact durations both conflict. Independently queried artist identities take priority over unverified positional associations.
 - Adds **Original Metadata** to Credits. **Title**, **Artist** and **Album** show only nonempty values actually replaced by the extension.
